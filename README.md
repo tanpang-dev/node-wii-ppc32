@@ -5,6 +5,25 @@ Prebuilt Node.js 22.11.0 for Wii Linux PPC32 big-endian.
 This project distributes a standalone `node` executable. It does not require
 building Node.js on the Wii.
 
+## Unreliable Network Install
+
+The `chunks` branch contains a gzip-compressed executable split into 1 MB
+chunks. It is intended for Wii systems where one large Git transfer resets.
+Clone metadata only, retrieve the installer, then let it fetch and verify each
+chunk separately:
+
+```sh
+git clone --depth 1 --filter=blob:none --no-checkout --branch chunks https://github.com/tanpang-dev/node-wii-ppc32.git node22-chunks
+cd node22-chunks
+git show HEAD:install-from-chunks.sh > install-from-chunks.sh
+chmod 755 install-from-chunks.sh
+./install-from-chunks.sh /root/node22-github-chunks
+```
+
+The installer retries each missing chunk, verifies every chunk, verifies the
+combined gzip file and final executable, then runs a basic Node.js test. It
+does not replace the system Node.js installation.
+
 ## Install
 
 Download the release asset, verify it, then run it from a new path. Do not
