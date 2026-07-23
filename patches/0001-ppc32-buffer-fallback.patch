@@ -1,0 +1,263 @@
+--- a/lib/buffer.js
++++ b/lib/buffer.js
+@@ -41,6 +41,7 @@
+   StringPrototypeSlice,
+   StringPrototypeToLowerCase,
+   StringPrototypeTrim,
++  StringFromCharCode,
+   SymbolSpecies,
+   SymbolToPrimitive,
+   TypedArrayPrototypeFill,
+@@ -624,15 +625,153 @@
+ 
+   // Base64 ratio: 3/4
+   return (bytes * 3) >>> 2;
++}
++
++// The Wii's Broadway CPU lacks newer PowerISA rounding instructions. On the
++// PPC32 port, the native Buffer string slice methods can consequently fail for
++// valid buffers. Keep the public Buffer API independent from those methods.
++const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
++const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
++const HEX_ALPHABET = '0123456789abcdef';
++
++function appendChar(parts, chunk, code) {
++  chunk += StringFromCharCode(code);
++  if (chunk.length >= 8192) {
++    parts.push(chunk);
++    return '';
++  }
++  return chunk;
+ }
++
++function joinDecoded(parts, chunk) {
++  if (chunk.length !== 0) parts.push(chunk);
++  return parts.join('');
++}
++
++function utf8SlicePortable(buf, start, end) {
++  const parts = [];
++  let chunk = '';
++  for (let index = start; index < end;) {
++    const first = buf[index++];
++    if (first < 0x80) {
++      chunk = appendChar(parts, chunk, first);
++      continue;
++    }
++
++    let codePoint = 0xfffd;
++    let extra = 0;
++    if (first >= 0xc2 && first <= 0xdf) {
++      extra = 1;
++      codePoint = first & 0x1f;
++    } else if (first >= 0xe0 && first <= 0xef) {
++      extra = 2;
++      codePoint = first & 0x0f;
++    } else if (first >= 0xf0 && first <= 0xf4) {
++      extra = 3;
++      codePoint = first & 0x07;
++    }
+ 
++    if (extra === 0 || index + extra > end) {
++      chunk = appendChar(parts, chunk, 0xfffd);
++      continue;
++    }
++
++    let valid = true;
++    for (let offset = 0; offset < extra; offset++) {
++      const next = buf[index + offset];
++      if ((next & 0xc0) !== 0x80) {
++        valid = false;
++        break;
++      }
++      codePoint = (codePoint << 6) | (next & 0x3f);
++    }
++    if ((first === 0xe0 && buf[index] < 0xa0) ||
++        (first === 0xed && buf[index] >= 0xa0) ||
++        (first === 0xf0 && buf[index] < 0x90) ||
++        (first === 0xf4 && buf[index] >= 0x90)) {
++      valid = false;
++    }
++
++    if (!valid) {
++      chunk = appendChar(parts, chunk, 0xfffd);
++      continue;
++    }
++
++    index += extra;
++    if (codePoint <= 0xffff) {
++      chunk = appendChar(parts, chunk, codePoint);
++    } else {
++      const adjusted = codePoint - 0x10000;
++      chunk = appendChar(parts, chunk, 0xd800 + (adjusted >> 10));
++      chunk = appendChar(parts, chunk, 0xdc00 + (adjusted & 0x3ff));
++    }
++  }
++  return joinDecoded(parts, chunk);
++}
++
++function singleByteSlicePortable(buf, start, end, ascii) {
++  const parts = [];
++  let chunk = '';
++  for (let index = start; index < end; index++) {
++    chunk = appendChar(parts, chunk, ascii ? buf[index] & 0x7f : buf[index]);
++  }
++  return joinDecoded(parts, chunk);
++}
++
++function utf16leSlicePortable(buf, start, end) {
++  const parts = [];
++  let chunk = '';
++  for (let index = start; index + 1 < end; index += 2) {
++    chunk = appendChar(parts, chunk, buf[index] | (buf[index + 1] << 8));
++  }
++  return joinDecoded(parts, chunk);
++}
++
++function hexSlicePortable(buf, start, end) {
++  const parts = [];
++  let chunk = '';
++  for (let index = start; index < end; index++) {
++    const byte = buf[index];
++    chunk += HEX_ALPHABET[byte >> 4] + HEX_ALPHABET[byte & 0x0f];
++    if (chunk.length >= 8192) {
++      parts.push(chunk);
++      chunk = '';
++    }
++  }
++  return joinDecoded(parts, chunk);
++}
++
++function base64SlicePortable(buf, start, end, url) {
++  const alphabet = url ? BASE64URL_ALPHABET : BASE64_ALPHABET;
++  const parts = [];
++  let chunk = '';
++  for (let index = start; index < end; index += 3) {
++    const first = buf[index];
++    const hasSecond = index + 1 < end;
++    const hasThird = index + 2 < end;
++    const second = hasSecond ? buf[index + 1] : 0;
++    const third = hasThird ? buf[index + 2] : 0;
++    chunk += alphabet[first >> 2];
++    chunk += alphabet[((first & 0x03) << 4) | (second >> 4)];
++    if (hasSecond) chunk += alphabet[((second & 0x0f) << 2) | (third >> 6)];
++    else if (!url) chunk += '=';
++    if (hasThird) chunk += alphabet[third & 0x3f];
++    else if (!url) chunk += '=';
++    if (chunk.length >= 8192) {
++      parts.push(chunk);
++      chunk = '';
++    }
++  }
++  return joinDecoded(parts, chunk);
++}
++
+ const encodingOps = {
+   utf8: {
+     encoding: 'utf8',
+     encodingVal: encodingsMap.utf8,
+     byteLength: byteLengthUtf8,
+     write: (buf, string, offset, len) => buf.utf8Write(string, offset, len),
+-    slice: (buf, start, end) => buf.utf8Slice(start, end),
++    slice: utf8SlicePortable,
+     indexOf: (buf, val, byteOffset, dir) =>
+       indexOfString(buf, val, byteOffset, encodingsMap.utf8, dir),
+   },
+@@ -641,7 +780,7 @@
+     encodingVal: encodingsMap.utf16le,
+     byteLength: (string) => string.length * 2,
+     write: (buf, string, offset, len) => buf.ucs2Write(string, offset, len),
+-    slice: (buf, start, end) => buf.ucs2Slice(start, end),
++    slice: utf16leSlicePortable,
+     indexOf: (buf, val, byteOffset, dir) =>
+       indexOfString(buf, val, byteOffset, encodingsMap.utf16le, dir),
+   },
+@@ -650,7 +789,7 @@
+     encodingVal: encodingsMap.utf16le,
+     byteLength: (string) => string.length * 2,
+     write: (buf, string, offset, len) => buf.ucs2Write(string, offset, len),
+-    slice: (buf, start, end) => buf.ucs2Slice(start, end),
++    slice: utf16leSlicePortable,
+     indexOf: (buf, val, byteOffset, dir) =>
+       indexOfString(buf, val, byteOffset, encodingsMap.utf16le, dir),
+   },
+@@ -659,7 +798,7 @@
+     encodingVal: encodingsMap.latin1,
+     byteLength: (string) => string.length,
+     write: (buf, string, offset, len) => buf.latin1Write(string, offset, len),
+-    slice: (buf, start, end) => buf.latin1Slice(start, end),
++    slice: (buf, start, end) => singleByteSlicePortable(buf, start, end, false),
+     indexOf: (buf, val, byteOffset, dir) =>
+       indexOfString(buf, val, byteOffset, encodingsMap.latin1, dir),
+   },
+@@ -668,7 +807,7 @@
+     encodingVal: encodingsMap.ascii,
+     byteLength: (string) => string.length,
+     write: (buf, string, offset, len) => buf.asciiWrite(string, offset, len),
+-    slice: (buf, start, end) => buf.asciiSlice(start, end),
++    slice: (buf, start, end) => singleByteSlicePortable(buf, start, end, true),
+     indexOf: (buf, val, byteOffset, dir) =>
+       indexOfBuffer(buf,
+                     fromStringFast(val, encodingOps.ascii),
+@@ -681,7 +820,7 @@
+     encodingVal: encodingsMap.base64,
+     byteLength: (string) => base64ByteLength(string, string.length),
+     write: (buf, string, offset, len) => buf.base64Write(string, offset, len),
+-    slice: (buf, start, end) => buf.base64Slice(start, end),
++    slice: (buf, start, end) => base64SlicePortable(buf, start, end, false),
+     indexOf: (buf, val, byteOffset, dir) =>
+       indexOfBuffer(buf,
+                     fromStringFast(val, encodingOps.base64),
+@@ -695,7 +834,7 @@
+     byteLength: (string) => base64ByteLength(string, string.length),
+     write: (buf, string, offset, len) =>
+       buf.base64urlWrite(string, offset, len),
+-    slice: (buf, start, end) => buf.base64urlSlice(start, end),
++    slice: (buf, start, end) => base64SlicePortable(buf, start, end, true),
+     indexOf: (buf, val, byteOffset, dir) =>
+       indexOfBuffer(buf,
+                     fromStringFast(val, encodingOps.base64url),
+@@ -708,7 +847,7 @@
+     encodingVal: encodingsMap.hex,
+     byteLength: (string) => string.length >>> 1,
+     write: (buf, string, offset, len) => buf.hexWrite(string, offset, len),
+-    slice: (buf, start, end) => buf.hexSlice(start, end),
++    slice: hexSlicePortable,
+     indexOf: (buf, val, byteOffset, dir) =>
+       indexOfBuffer(buf,
+                     fromStringFast(val, encodingOps.hex),
+@@ -833,12 +972,14 @@
+ // to their upper/lower bounds if the value passed is out of range.
+ Buffer.prototype.toString = function toString(encoding, start, end) {
+   if (arguments.length === 0) {
+-    return this.utf8Slice(0, this.length);
++    return encodingOps.utf8.slice(this, 0, this.length);
+   }
+ 
+   const len = this.length;
+ 
+-  if (start <= 0)
++  if (start === undefined || NumberIsNaN(start))
++    start = 0;
++  else if (start <= 0)
+     start = 0;
+   else if (start >= len)
+     return '';
+@@ -854,7 +995,7 @@
+     return '';
+ 
+   if (encoding === undefined)
+-    return this.utf8Slice(start, end);
++    return encodingOps.utf8.slice(this, start, end);
+ 
+   const ops = getEncodingOps(encoding);
+   if (ops === undefined)
+@@ -885,7 +1026,7 @@
+   const actualMax = MathMin(max, this.length);
+   const remaining = this.length - max;
+   let str = StringPrototypeTrim(RegExpPrototypeSymbolReplace(
+-    /(.{2})/g, this.hexSlice(0, actualMax), '$1 '));
++    /(.{2})/g, encodingOps.hex.slice(this, 0, actualMax), '$1 '));
+   if (remaining > 0)
+     str += ` ... ${remaining} more byte${remaining > 1 ? 's' : ''}`;
+   // Inspect special properties as well, if possible.
