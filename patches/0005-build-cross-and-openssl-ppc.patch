@@ -1,0 +1,135 @@
+--- a/tools/v8_gypfiles/toolchain.gypi
++++ b/tools/v8_gypfiles/toolchain.gypi
+@@ -41,7 +41,7 @@
+     'has_valgrind%': 0,
+     'coverage%': 0,
+     'v8_target_arch%': '<(target_arch)',
+-    'v8_host_byteorder%': '<!("<(python)" -c "import sys; print(sys.byteorder)")',
++    'v8_host_byteorder%': 'big',
+     'force_dynamic_crt%': 0,
+ 
+     # Setting 'v8_can_use_vfp32dregs' to 'true' will cause V8 to use the VFP
+--- a/tools/v8_gypfiles/features.gypi
++++ b/tools/v8_gypfiles/features.gypi
+@@ -294,7 +294,9 @@
+ 
+     # Enable Sparkplug
+     # Sets -DV8_ENABLE_SPARKPLUG.
+-    'v8_enable_sparkplug%': 1,
++    # ppc32(Wii)向け: baseline(Sparkplug)は PPC64 しか対応していない
++    # (baseline-assembler-inl.h の振り分けに V8_TARGET_ARCH_PPC が無い)。
++    'v8_enable_sparkplug%': 0,
+ 
+     # Whether custom embedder snapshots may extend (= allocate new objects in)
+     # ReadOnlySpace.
+@@ -324,7 +326,8 @@
+     # will fail. Also, asm.js will not be translated to WebAssembly and will be
+     # executed as standard JavaScript instead.
+     # Sets -dV8_ENABLE_WEBASSEMBLY.
+-    'v8_enable_webassembly%': 1,
++    # ppc32(Wii): WASMは jump-table-assembler.h が ppc32 を持たないため不可。
++    'v8_enable_webassembly%': 0,
+ 
+     # Enable advanced BigInt algorithms, costing about 10-30 KiB binary size
+     # depending on platform.
+--- a/tools/v8_gypfiles/v8.gyp
++++ b/tools/v8_gypfiles/v8.gyp
+@@ -8,7 +8,7 @@
+     'v8_random_seed%': 314159265,
+     'v8_vector_stores%': 0,
+     'v8_embed_script%': "",
+-    'mksnapshot_exec': '<(PRODUCT_DIR)/<(EXECUTABLE_PREFIX)mksnapshot<(EXECUTABLE_SUFFIX)',
++    'mksnapshot_exec': '<(PRODUCT_DIR)/run-mksnapshot-qemu.sh',
+     'v8_os_page_size%': 0,
+     'generate_bytecode_output_root': '<(SHARED_INTERMEDIATE_DIR)/generate-bytecode-output-root',
+     'generate_bytecode_builtins_list_output': '<(generate_bytecode_output_root)/builtins-generated/bytecodes-builtins-list.h',
+@@ -383,6 +383,9 @@
+       'target_name': 'v8_snapshot',
+       'type': 'static_library',
+       'toolsets': ['target'],
++      # ppc32移植: 実行は qemu ラッパー経由なので、target版 mksnapshot を
++      # 先にビルドさせる依存をここで明示する。
++      'dependencies': ['mksnapshot'],
+       'sources': [
+         '<(V8_ROOT)/src/init/setup-isolate-deserialize.cc',
+       ],
+@@ -412,6 +415,7 @@
+           },
+           'inputs': [
+             '<(mksnapshot_exec)',
++            '<(PRODUCT_DIR)/mksnapshot_target',
+           ],
+           'outputs': [
+             '<(INTERMEDIATE_DIR)/snapshot.cc',
+@@ -1695,6 +1699,11 @@
+     {
+       'target_name': 'mksnapshot',
+       'type': 'executable',
++      # ppc32移植: target(BE)版は別名にしてhost版と衝突させない。
++      # 実行は run-mksnapshot-qemu.sh が qemu 経由で target 版を呼ぶ。
++      'target_conditions': [
++        ['_toolset=="target"', {'product_name': 'mksnapshot_target'}],
++      ],
+       'dependencies': [
+         'v8_base_without_compiler',
+         'v8_compiler_for_mksnapshot',
+@@ -1711,8 +1720,10 @@
+         '<!@pymod_do_main(GN-scraper "<(V8_ROOT)/BUILD.gn"  "\\"mksnapshot.*?sources = ")',
+       ],
+       'conditions': [
++        # ppc32移植: mksnapshot をターゲット(BE)としてビルドし qemu で実行する。
++        # ホスト(LE)ネイティブだとヒープ像がLEで書き出され実機で壊れる。
+         ['want_separate_host_toolset', {
+-          'toolsets': ['host'],
++          'toolsets': ['host', 'target'],
+         }],
+         # Avoid excessive LTO
+         ['enable_lto=="true"', {
+@@ -1923,9 +1934,15 @@
+             ],
+           }, { # 'OS!="win"'
+             'conditions': [
+-              ['_toolset == "host" and host_arch == "x64" or _toolset == "target" and target_arch=="x64"', {
++              ['_toolset == "host" and host_arch == "x64" and target_arch != "ppc" or _toolset == "target" and target_arch=="x64"', {
+                 'sources': [
+                   '<(V8_ROOT)/src/heap/base/asm/x64/push_registers_asm.cc',
++                ],
++              }],
++              # ppc32ターゲットではホストツールが -m32 になるため ia32 版を使う。
++              ['_toolset == "host" and host_arch == "x64" and target_arch == "ppc"', {
++                'sources': [
++                  '<(V8_ROOT)/src/heap/base/asm/ia32/push_registers_asm.cc',
+                 ],
+               }],
+               ['_toolset == "host" and host_arch == "ia32" or _toolset == "target" and target_arch=="ia32"', {
+@@ -1943,7 +1960,7 @@
+                   '<(V8_ROOT)/src/heap/base/asm/arm64/push_registers_asm.cc',
+                 ],
+               }],
+-              ['_toolset == "host" and host_arch == "ppc64" or _toolset == "target" and target_arch=="ppc64"', {
++              ['_toolset == "host" and host_arch == "ppc64" or _toolset == "target" and target_arch=="ppc64" or _toolset == "target" and target_arch=="ppc"', {
+                 'sources': [
+                   '<(V8_ROOT)/src/heap/base/asm/ppc/push_registers_asm.cc',
+                 ],
+--- a/deps/openssl/openssl_no_asm.gypi
++++ b/deps/openssl/openssl_no_asm.gypi
+@@ -5,6 +5,8 @@
+       'includes': ['config/archs/aix64-gcc-as/no-asm/openssl.gypi'],
+     }, 'target_arch=="ppc64" and OS=="linux" and node_byteorder =="little"', {
+       'includes': ['config/archs/linux-ppc64le/no-asm/openssl.gypi'],
++    }, 'target_arch=="ppc" and OS=="linux"', {
++      'includes': ['config/archs/linux-ppc/no-asm/openssl.gypi'],
+     }, 'target_arch=="s390x" and OS=="linux"', {
+       'includes': ['config/archs/linux64-s390x/no-asm/openssl.gypi'],
+     }, 'target_arch=="arm" and OS in ("linux", "android")', {
+--- a/deps/openssl/openssl-cl_no_asm.gypi
++++ b/deps/openssl/openssl-cl_no_asm.gypi
+@@ -4,6 +4,8 @@
+       'includes': ['config/archs/aix64-gcc-as/no-asm/openssl-cl.gypi'],
+     }, 'target_arch=="ppc64" and OS=="linux" and node_byteorder =="little"', {
+       'includes': ['config/archs/linux-ppc64le/no-asm/openssl-cl.gypi'],
++    }, 'target_arch=="ppc" and OS=="linux"', {
++      'includes': ['config/archs/linux-ppc/no-asm/openssl-cl.gypi'],
+     }, 'target_arch=="s390x" and OS=="linux"', {
+       'includes': ['config/archs/linux64-s390x/no-asm/openssl-cl.gypi'],
+     }, 'target_arch=="arm" and OS in ("linux", "android")', {

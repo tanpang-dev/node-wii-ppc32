@@ -1,0 +1,196 @@
+--- a/deps/v8/src/execution/ppc/simulator-ppc.h
++++ b/deps/v8/src/execution/ppc/simulator-ppc.h
+@@ -325,6 +325,7 @@
+   }
+ 
+   // Byte Reverse.
++#ifdef __SIZEOF_INT128__
+   static inline __uint128_t __builtin_bswap128(__uint128_t v) {
+     union {
+       uint64_t u64[2];
+@@ -335,14 +336,35 @@
+     res.u64[1] = ByteReverse<int64_t>(val.u64[0]);
+     return res.u128;
+   }
++#endif
+ 
++// 32bitホスト(-m32)には __int128 が無い。QW(128bit)はSIMD用で
++// ppc32ターゲットでは到達しないため、その場合は一覧から外す。
++#ifdef __SIZEOF_INT128__
++// 32bitホスト(-m32)には __int128 が無い。QW(128bit)はSIMD用で
++// ppc32ターゲットでは到達しないため、その場合は一覧から外す。
++#ifdef __SIZEOF_INT128__
+ #define RW_VAR_LIST(V)      \
+   V(QWU, unsigned __int128) \
+   V(QW, __int128)           \
++  V(DWU, uint64_t)          \
++  V(DW, int64_t)            \
++  V(WU, uint32_t)           \
++  V(W, int32_t) V(HU, uint16_t) V(H, int16_t) V(BU, uint8_t) V(B, int8_t)
++#else
++#define RW_VAR_LIST(V)      \
+   V(DWU, uint64_t)          \
+   V(DW, int64_t)            \
+   V(WU, uint32_t)           \
+   V(W, int32_t) V(HU, uint16_t) V(H, int16_t) V(BU, uint8_t) V(B, int8_t)
++#endif
++#else
++#define RW_VAR_LIST(V)      \
++  V(DWU, uint64_t)          \
++  V(DW, int64_t)            \
++  V(WU, uint32_t)           \
++  V(W, int32_t) V(HU, uint16_t) V(H, int16_t) V(BU, uint8_t) V(B, int8_t)
++#endif
+ 
+ #define GENERATE_RW_FUNC(size, type)                   \
+   inline type Read##size(uintptr_t addr);              \
+--- a/deps/v8/src/execution/ppc/simulator-ppc.cc
++++ b/deps/v8/src/execution/ppc/simulator-ppc.cc
+@@ -940,8 +940,20 @@
+ }
+ 
+ static void decodeObjectPair(ObjectPair* pair, intptr_t* x, intptr_t* y) {
++#ifdef V8_HOST_ARCH_64_BIT
+   *x = static_cast<intptr_t>(pair->x);
+   *y = static_cast<intptr_t>(pair->y);
++#else
++  // 32bitホストでは ObjectPair は2つのポインタを詰めた uint64_t
++  // (runtime-utils.h の MakePair 参照)。同じ並びで取り出す。
++#if defined(V8_TARGET_BIG_ENDIAN)
++  *x = static_cast<intptr_t>(*pair >> 32);
++  *y = static_cast<intptr_t>(*pair & 0xFFFFFFFFu);
++#else
++  *x = static_cast<intptr_t>(*pair & 0xFFFFFFFFu);
++  *y = static_cast<intptr_t>(*pair >> 32);
++#endif
++#endif
+ }
+ 
+ // Calls into the V8 runtime.
+@@ -2310,7 +2322,7 @@
+       uintptr_t rs_val = get_register(rs);
+       uintptr_t count = 0;
+       int n = 0;
+-      uintptr_t bit = 0x8000000000000000UL;
++      uintptr_t bit = static_cast<uintptr_t>(1) << (sizeof(uintptr_t) * 8 - 1);
+       for (; n < 64; n++) {
+         if (bit & rs_val) count++;
+         bit >>= 1;
+@@ -3584,6 +3596,17 @@
+       set_d_register_from_double(frt, frt_val);
+       return;
+     }
++    case FRSQRTE: {
++      // 750CL向けソフトsqrt(SqrtDoubleSoft)が使う逆数平方根の概算命令。
++      // 実機は約5bit精度だが、生成コード側がNewton-Raphsonで補正するので
++      // ここでは正確な 1/sqrt(x) を返してよい。
++      int frt = instr->RTValue();
++      int frb = instr->RBValue();
++      double frb_val = get_double_from_d_register(frb);
++      double frt_val = 1.0 / std::sqrt(frb_val);
++      set_d_register_from_double(frt, frt_val);
++      return;
++    }
+     case FSEL: {
+       int frt = instr->RTValue();
+       int fra = instr->RAValue();
+@@ -4237,6 +4260,7 @@
+       set_simd_register(vrt, *ptr);
+       break;
+     }
++#ifdef __SIZEOF_INT128__  // ppc32ホストではSIMD非対応
+     case STVX: {
+       DECODE_VX_INSTRUCTION(vrs, ra, rb, S)
+       GET_ADDRESS(ra, rb, ra_val, rb_val)
+@@ -4244,6 +4268,7 @@
+       WriteQW((ra_val + rb_val) & 0xFFFFFFFFFFFFFFF0, vrs_val);
+       break;
+     }
++#endif  // __SIZEOF_INT128__
+     case LXVD: {
+       DECODE_VX_INSTRUCTION(xt, ra, rb, T)
+       GET_ADDRESS(ra, rb, ra_val, rb_val)
+@@ -4268,6 +4293,7 @@
+               get_simd_register_by_lane<int64_t>(xs, 1));
+       break;
+     }
++#ifdef __SIZEOF_INT128__  // ppc32ホストではSIMD非対応
+     case STXVX: {
+       DECODE_VX_INSTRUCTION(vrs, ra, rb, S)
+       GET_ADDRESS(ra, rb, ra_val, rb_val)
+@@ -4276,6 +4302,7 @@
+       WriteQW(addr, vrs_val);
+       break;
+     }
++#endif  // __SIZEOF_INT128__
+     case LXSIBZX: {
+       DECODE_VX_INSTRUCTION(xt, ra, rb, T)
+       GET_ADDRESS(ra, rb, ra_val, rb_val)
+@@ -4324,6 +4351,7 @@
+       WriteDW(ra_val + rb_val, get_simd_register_by_lane<int64_t>(xs, 0));
+       break;
+     }
++#ifdef __SIZEOF_INT128__  // ppc32ホストではSIMD非対応
+     case XXBRQ: {
+       int t = instr->RTValue();
+       int b = instr->RBValue();
+@@ -4333,6 +4361,7 @@
+       set_simd_register(t, simdr_xb);
+       break;
+     }
++#endif  // __SIZEOF_INT128__
+ #define VSPLT(type)                                       \
+   uint8_t uim = instr->Bits(19, 16);                      \
+   int vrt = instr->RTValue();                             \
+@@ -5123,22 +5152,23 @@
+       break;
+     }
+     case XVRSPIP: {
+-      VECTOR_FP_ROUNDING(float, ceilf)
++      VECTOR_FP_ROUNDING(float, ceil)
+       break;
+     }
+     case XVRSPIM: {
+-      VECTOR_FP_ROUNDING(float, floorf)
++      VECTOR_FP_ROUNDING(float, floor)
+       break;
+     }
+     case XVRSPIZ: {
+-      VECTOR_FP_ROUNDING(float, truncf)
++      VECTOR_FP_ROUNDING(float, trunc)
+       break;
+     }
+     case XVRSPI: {
+-      VECTOR_FP_ROUNDING(float, nearbyintf)
++      VECTOR_FP_ROUNDING(float, nearbyint)
+       break;
+     }
+ #undef VECTOR_FP_ROUNDING
++#ifdef __SIZEOF_INT128__  // ppc32ホストではSIMD非対応
+     case VSEL: {
+       int vrt = instr->RTValue();
+       int vra = instr->RAValue();
+@@ -5155,6 +5185,7 @@
+       set_simd_register(vrt, *result);
+       break;
+     }
++#endif  // __SIZEOF_INT128__
+     case VPERM: {
+       int vrt = instr->RTValue();
+       int vra = instr->RAValue();
+@@ -5177,6 +5208,7 @@
+       }
+       break;
+     }
++#ifdef __SIZEOF_INT128__  // ppc32ホストではSIMD非対応
+     case VBPERMQ: {
+       DECODE_VX_INSTRUCTION(t, a, b, T)
+       uint16_t result_bits = 0;
+@@ -5196,6 +5228,7 @@
+       set_simd_register_by_lane<uint16_t>(t, 3, result_bits);
+       break;
+     }
++#endif  // __SIZEOF_INT128__
+ #define VECTOR_FP_QF(type, sign)                             \
+   DECODE_VX_INSTRUCTION(t, a, b, T)                          \
+   FOR_EACH_LANE(i, type) {                                   \
