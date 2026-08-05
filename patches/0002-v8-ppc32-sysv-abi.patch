@@ -1,0 +1,33 @@
+--- a/deps/v8/src/codegen/ppc/register-ppc.h
++++ b/deps/v8/src/codegen/ppc/register-ppc.h
+@@ -93,7 +93,7 @@
+ const int kNumRequiredStackFrameSlots = 12;
+ const int kStackFrameLRSlot = 2;
+ const int kStackFrameExtraParamSlot = 12;
+-#else  // AIX
++#elif V8_OS_AIX || V8_TARGET_ARCH_PPC64  // AIX / ppc64 ELFv1
+ // [0] back chain
+ // [1] condition register save area
+ // [2] link register save area
+@@ -105,9 +105,21 @@
+ // [13] Parameter8 save area
+ // [14] Parameter9 slot (if necessary)
+ // ...
++#if V8_TARGET_ARCH_PPC64
+ const int kNumRequiredStackFrameSlots = 14;
++#else
++const int kNumRequiredStackFrameSlots = 16;
++#endif
+ const int kStackFrameLRSlot = 2;
+ const int kStackFrameExtraParamSlot = 14;
++#else  // ppc32 Linux (SysV ABI)
++// [0] back chain
++// [1] link register save area
++// [2] Parameter9 slot (if necessary)
++// ...
++const int kNumRequiredStackFrameSlots = 4;
++const int kStackFrameLRSlot = 1;
++const int kStackFrameExtraParamSlot = 2;
+ #endif
+ 
+ enum RegisterCode {

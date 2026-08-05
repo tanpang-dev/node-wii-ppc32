@@ -1,0 +1,33 @@
+--- a/deps/v8/src/snapshot/snapshot.cc
++++ b/deps/v8/src/snapshot/snapshot.cc
+@@ -57,15 +57,26 @@
+   static base::Vector<const uint8_t> ExtractContextData(
+       const v8::StartupData* data, uint32_t index);
+ 
++  // ppc32移植: ヘッダは「LEバイト列」で読み書きする約束だが、V8の
++  // Read/WriteLittleEndianValue は *ターゲット* のエンディアンで分岐するため、
++  // LEホスト上で動く mksnapshot が BE 分岐を通ってヘッダをBEで書いてしまう
++  // (ペイロード本体はターゲット=BEで正しいので、そちらは触らない)。
++  // ここだけ機械に依存しない明示的なLE入出力にする。
+   static uint32_t GetHeaderValue(const v8::StartupData* data, uint32_t offset) {
+     DCHECK_NOT_NULL(data);
+     DCHECK_LT(offset, static_cast<uint32_t>(data->raw_size));
+-    return base::ReadLittleEndianValue<uint32_t>(
+-        reinterpret_cast<Address>(data->data) + offset);
++    const uint8_t* p =
++        reinterpret_cast<const uint8_t*>(data->data) + offset;
++    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
++           (static_cast<uint32_t>(p[2]) << 16) |
++           (static_cast<uint32_t>(p[3]) << 24);
+   }
+   static void SetHeaderValue(char* data, uint32_t offset, uint32_t value) {
+-    base::WriteLittleEndianValue(reinterpret_cast<Address>(data) + offset,
+-                                 value);
++    uint8_t* p = reinterpret_cast<uint8_t*>(data) + offset;
++    p[0] = static_cast<uint8_t>(value);
++    p[1] = static_cast<uint8_t>(value >> 8);
++    p[2] = static_cast<uint8_t>(value >> 16);
++    p[3] = static_cast<uint8_t>(value >> 24);
+   }
+ 
+   static void CheckVersion(const v8::StartupData* data);
