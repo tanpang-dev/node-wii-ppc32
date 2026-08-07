@@ -9,29 +9,6 @@
      'force_dynamic_crt%': 0,
  
      # Setting 'v8_can_use_vfp32dregs' to 'true' will cause V8 to use the VFP
---- a/tools/v8_gypfiles/features.gypi
-+++ b/tools/v8_gypfiles/features.gypi
-@@ -294,7 +294,9 @@
- 
-     # Enable Sparkplug
-     # Sets -DV8_ENABLE_SPARKPLUG.
--    'v8_enable_sparkplug%': 1,
-+    # ppc32(Wii)向け: baseline(Sparkplug)は PPC64 しか対応していない
-+    # (baseline-assembler-inl.h の振り分けに V8_TARGET_ARCH_PPC が無い)。
-+    'v8_enable_sparkplug%': 0,
- 
-     # Whether custom embedder snapshots may extend (= allocate new objects in)
-     # ReadOnlySpace.
-@@ -324,7 +326,8 @@
-     # will fail. Also, asm.js will not be translated to WebAssembly and will be
-     # executed as standard JavaScript instead.
-     # Sets -dV8_ENABLE_WEBASSEMBLY.
--    'v8_enable_webassembly%': 1,
-+    # ppc32(Wii): WASMは jump-table-assembler.h が ppc32 を持たないため不可。
-+    'v8_enable_webassembly%': 0,
- 
-     # Enable advanced BigInt algorithms, costing about 10-30 KiB binary size
-     # depending on platform.
 --- a/tools/v8_gypfiles/v8.gyp
 +++ b/tools/v8_gypfiles/v8.gyp
 @@ -8,7 +8,7 @@
