@@ -5,10 +5,11 @@ Prebuilt Node.js 22.11.0 for Wii Linux PPC32 big-endian.
 This project distributes a standalone `node` executable. It does not require
 building Node.js on the Wii.
 
-## Current Build: `jit-r1`
+## Current Build: `jit-r2`
 
-`node-v22.11.0-wii-ppc32-jit-r1` runs with **V8 JIT enabled**. Earlier builds
-had to be started with `--jitless`; this one does not.
+`node-v22.11.0-wii-ppc32-jit-r2` runs with **V8 JIT enabled**, including the
+Sparkplug baseline tier. Earlier builds had to be started with `--jitless`;
+this one does not.
 
 The 750CL (Broadway) CPU is missing instructions that V8's PPC backend assumes,
 and V8 removed its PPC 32-bit code paths in 2024. This build restores those
@@ -21,7 +22,7 @@ rather than working around the symptoms in JavaScript. As a result:
   that `jitless-r2` needed is gone.
 - Compute-bound JavaScript is several times faster (see Measurements).
 
-The binary SHA-256 is recorded in `SHA256SUMS.node-v22.11.0-wii-ppc32-jit-r1`.
+The binary SHA-256 is recorded in `SHA256SUMS.node-v22.11.0-wii-ppc32-jit-r2`.
 The source changes are in `patches/` for review.
 
 This repository distributes a tested binary and the patches used to produce it.
@@ -36,9 +37,9 @@ verify each chunk separately:
 ```sh
 git clone --depth 1 --filter=blob:none --no-checkout --branch chunks https://github.com/tanpang-dev/node-wii-ppc32.git node22-chunks
 cd node22-chunks
-git show HEAD:install-jit-from-chunks.sh > install-jit-from-chunks.sh
-chmod 755 install-jit-from-chunks.sh
-./install-jit-from-chunks.sh /root/node22-jit-r1
+git show HEAD:install-jit-from-chunks-r2.sh > install-jit-from-chunks-r2.sh
+chmod 755 install-jit-from-chunks-r2.sh
+./install-jit-from-chunks-r2.sh /root/node22-jit-r2
 ```
 
 The installer retries each missing chunk, verifies every chunk, verifies the
@@ -47,7 +48,7 @@ replace the system Node.js installation.
 
 ## Verification
 
-`jit-r1` was validated on Wii Linux (PowerPC 750CL, 729 MHz, 73 MB RAM):
+`jit-r2` was validated on Wii Linux (PowerPC 750CL, 729 MHz, 73 MB RAM):
 
 - Node.js startup, `npm 6.14.12`
 - `Buffer` hex/base64/UTF-8 conversion, including multi-byte and 100 KB buffers
@@ -66,9 +67,9 @@ environment remains a separate compatibility concern.
 
 ## Measurements
 
-Steady-state, same machine, `jit-r1` versus `jitless-r2`:
+Steady-state, same machine, `jit-r2` versus `jitless-r2`:
 
-| Benchmark | jit-r1 | jitless-r2 |
+| Benchmark | jit-r2 | jitless-r2 |
 |---|---|---|
 | Arithmetic loop, 3,000,000 iterations | 221 ms | 2739 ms |
 | Regular expression, 50,000 matches | 245 ms | 684 ms |
@@ -79,6 +80,31 @@ Steady-state, same machine, `jit-r1` versus `jitless-r2`:
 Resident memory is comparable (35 MB versus 33 MB). Startup is slower with JIT
 enabled, roughly 2-4 seconds against roughly 2 seconds.
 
+## Sparkplug
+
+`jit-r2` adds the Sparkplug baseline compiler, which `jit-r1` did not have.
+
+V8 only dispatches its PPC baseline assembler for `V8_TARGET_ARCH_PPC64`, so
+PPC32 fell through to `#error Unsupported target architecture`. That looks like
+a missing port, but it is not: `baseline-assembler-ppc-inl.h` is written in
+terms of pointer-width operations, and its eleven explicit 64-bit uses already
+lower to `lwz`/`stw` on PPC32. Adding PPC32 to the two dispatch conditions is
+the entire change.
+
+Baseline code is about **1.8x faster than the interpreter** here, measured with
+`--no-opt` at both 1,000 and 10,000 calls per function. In practice the
+difference does not show, because hot code reaches TurboFan either way:
+
+| | jit-r2 | `--no-sparkplug` |
+|---|---|---|
+| Steady state, request-shaped workload | 236 ms | 232 ms |
+| First phase, including compilation | 1540 ms | 925 ms |
+
+Sparkplug compiles on the main thread, and at 729 MHz that costs a few
+milliseconds per function. Short-lived processes lose; long-lived ones break
+even. It is enabled because it makes the tier structure correct, not because it
+is faster.
+
 ## Patches
 
 | Patch | Contents |
@@ -87,7 +113,23 @@ enabled, roughly 2-4 seconds against roughly 2 seconds.
 | `0002-v8-ppc32-sysv-abi.patch` | Restores the PPC32 Linux SysV stack linkage constants. Without this, `JSEntry` saves the link register into the wrong slot of its caller's frame and JavaScript execution crashes immediately. |
 | `0003-v8-simulator-32bit-host.patch` | Lets the PPC simulator compile on a 32-bit host, which is required because V8 builds its host tools with `-m32` when the target is PPC32. |
 | `0004-v8-snapshot-header-endianness.patch` | The startup snapshot header is little-endian while its payload is target-endian. Makes the header accessors explicitly little-endian so they do not follow the target byte order. |
+| `0006-v8-enable-sparkplug-ppc32.patch` | Adds PPC32 to the two Sparkplug dispatch conditions and enables the feature. Eleven lines, most of them comments. |
 | `0005-build-cross-and-openssl-ppc.patch` | Cross-build configuration, and the missing OpenSSL `linux-ppc` branch. Without it, the arch selection falls back to `linux-x86_64` and bakes `-DL_ENDIAN` into a big-endian target. |
+
+## WebAssembly
+
+WebAssembly is disabled. Liftoff's PPC implementation assumes an i64 fits in one
+register, but PPC32 sets `kNeedI64RegPair`, so every 64-bit operation needs a
+register pair. The PPC file is 2979 lines against ia32's 4985, and that gap is
+the work. `jump-table-assembler` has no PPC32 branch either.
+
+SIMD is not the obstacle. `SupportsWasmSimd128()` already requires `PPC_9_PLUS`,
+so the 750CL reports no SIMD support and modules that avoid it would still run.
+
+## Previous Builds
+
+`node-v22.11.0-wii-ppc32-jit-r1` is the same port without Sparkplug. Its
+installer is `install-jit-from-chunks.sh`.
 
 ## Previous Build: `jitless-r2`
 

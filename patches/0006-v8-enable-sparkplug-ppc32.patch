@@ -1,0 +1,45 @@
+--- a/deps/v8/src/baseline/baseline-assembler-inl.h
++++ b/deps/v8/src/baseline/baseline-assembler-inl.h
+@@ -24,7 +24,7 @@
+ #include "src/baseline/ia32/baseline-assembler-ia32-inl.h"
+ #elif V8_TARGET_ARCH_ARM
+ #include "src/baseline/arm/baseline-assembler-arm-inl.h"
+-#elif V8_TARGET_ARCH_PPC64
++#elif V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_PPC
+ #include "src/baseline/ppc/baseline-assembler-ppc-inl.h"
+ #elif V8_TARGET_ARCH_S390X
+ #include "src/baseline/s390/baseline-assembler-s390-inl.h"
+--- a/deps/v8/src/baseline/baseline-compiler.cc
++++ b/deps/v8/src/baseline/baseline-compiler.cc
+@@ -38,7 +38,7 @@
+ #include "src/baseline/ia32/baseline-compiler-ia32-inl.h"
+ #elif V8_TARGET_ARCH_ARM
+ #include "src/baseline/arm/baseline-compiler-arm-inl.h"
+-#elif V8_TARGET_ARCH_PPC64
++#elif V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_PPC
+ #include "src/baseline/ppc/baseline-compiler-ppc-inl.h"
+ #elif V8_TARGET_ARCH_S390X
+ #include "src/baseline/s390/baseline-compiler-s390-inl.h"
+--- a/tools/v8_gypfiles/features.gypi
++++ b/tools/v8_gypfiles/features.gypi
+@@ -294,6 +294,8 @@
+ 
+     # Enable Sparkplug
+     # Sets -DV8_ENABLE_SPARKPLUG.
++    # ppc32(Wii): 有効。baseline-assembler-ppc-inl.h はポインタ幅で書かれており
++    # 32bit でもそのまま動く(include の振り分けに ppc32 を足すだけ)。
+     'v8_enable_sparkplug%': 1,
+ 
+     # Whether custom embedder snapshots may extend (= allocate new objects in)
+@@ -324,7 +326,10 @@
+     # will fail. Also, asm.js will not be translated to WebAssembly and will be
+     # executed as standard JavaScript instead.
+     # Sets -dV8_ENABLE_WEBASSEMBLY.
+-    'v8_enable_webassembly%': 1,
++    # ppc32(Wii): 無効。Liftoff が i64=単一レジスタ前提で、ppc32 の
++    # レジスタペア(kNeedI64RegPair)に未対応。jump-table-assembler.h にも ppc32 分岐が無い。
++    # (SIMD は SupportsWasmSimd128()=PPC_9_PLUS により 750CL では自動的に無効)
++    'v8_enable_webassembly%': 0,
+ 
+     # Enable advanced BigInt algorithms, costing about 10-30 KiB binary size
+     # depending on platform.
