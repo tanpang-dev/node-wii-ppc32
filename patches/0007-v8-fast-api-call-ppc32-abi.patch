@@ -1,0 +1,120 @@
+--- a/deps/v8/src/common/globals.h
++++ b/deps/v8/src/common/globals.h
+@@ -315,6 +315,13 @@
+ #define V8_ENABLE_FP_PARAMS_IN_C_LINKAGE 1
+ #endif
+ 
++// C++ ABI が pointer 幅の class type (v8::Local<T>) をレジスタではなく
++// invisible reference で渡すプラットフォーム。ppc32 SysV がこれに当たる
++// (codegen/ppc/constants-ppc.h の ABI_PASSES_HANDLES_IN_REGS==0 と同条件)。
++#if V8_TARGET_ARCH_PPC && !V8_TARGET_ARCH_PPC64
++#define V8_ABI_PASSES_HANDLES_BY_REFERENCE 1
++#endif
++
+ // Superclass for classes only using static method functions.
+ // The subclass of AllStatic cannot be instantiated at all.
+ class AllStatic {
+--- a/deps/v8/src/compiler/graph-assembler.h
++++ b/deps/v8/src/compiler/graph-assembler.h
+@@ -403,6 +403,10 @@
+ 
+   TNode<RawPtrT> StackSlot(int size, int alignment, bool is_tagged = false);
+ 
++  // Local<T> の中身 (val_ = ハンドルスロットのアドレス) を得る。
++  // 構造体フィールドへの格納など、値そのものが欲しい場所で使う。
++  Node* AdaptLocalValue(Node* argument);
++  // Local<T> を C 関数の引数として値渡しする。
+   Node* AdaptLocalArgument(Node* argument);
+ 
+   Node* Store(StoreRepresentation rep, Node* object, Node* offset, Node* value);
+--- a/deps/v8/src/compiler/graph-assembler.cc
++++ b/deps/v8/src/compiler/graph-assembler.cc
+@@ -1036,7 +1036,7 @@
+       graph()->NewNode(machine()->StackSlot(size, alignment, is_tagged)));
+ }
+ 
+-Node* GraphAssembler::AdaptLocalArgument(Node* argument) {
++Node* GraphAssembler::AdaptLocalValue(Node* argument) {
+ #ifdef V8_ENABLE_DIRECT_LOCAL
+   // With direct locals, the argument can be passed directly.
+   return BitcastTaggedToWord(argument);
+@@ -1048,6 +1048,22 @@
+                             kNoWriteBarrier),
+         stack_slot, 0, BitcastTaggedToWord(argument));
+   return stack_slot;
++#endif
++}
++
++Node* GraphAssembler::AdaptLocalArgument(Node* argument) {
++  Node* value = AdaptLocalValue(argument);
++#ifdef V8_ABI_PASSES_HANDLES_BY_REFERENCE
++  // Local<T> は class type なので値渡しでもレジスタに載らない。callee は
++  // 「Local へのポインタ」を期待するので、Local 自体をスタックに置く。
++  // 中身は不変 (内側スロットのアドレス) なので is_tagged は false。
++  Node* handle = StackSlot(sizeof(uintptr_t), alignof(uintptr_t), false);
++  Store(StoreRepresentation(MachineType::PointerRepresentation(),
++                            kNoWriteBarrier),
++        handle, 0, value);
++  return handle;
++#else
++  return value;
+ #endif
+ }
+ 
+--- a/deps/v8/src/compiler/fast-api-calls.cc
++++ b/deps/v8/src/compiler/fast-api-calls.cc
+@@ -349,7 +349,8 @@
+         static_cast<int>(offsetof(v8::FastApiCallbackOptions, fallback)),
+         __ Int32Constant(0));
+ 
+-    Node* data_argument_to_pass = __ AdaptLocalArgument(data_argument);
++    // options.data は Local<Value> 1 word のフィールドなので中身を入れる。
++    Node* data_argument_to_pass = __ AdaptLocalValue(data_argument);
+ 
+     __ Store(StoreRepresentation(MachineType::PointerRepresentation(),
+                                  kNoWriteBarrier),
+--- a/deps/v8/src/compiler/turboshaft/assembler.h
++++ b/deps/v8/src/compiler/turboshaft/assembler.h
+@@ -2600,7 +2600,8 @@
+     return ReduceIfReachableStackSlot(size, alignment, is_tagged);
+   }
+ 
+-  V<WordPtr> AdaptLocalArgument(V<Object> argument) {
++  // Local<T> の中身 (val_ = ハンドルスロットのアドレス) を得る。
++  V<WordPtr> AdaptLocalValue(V<Object> argument) {
+ #ifdef V8_ENABLE_DIRECT_LOCAL
+     // With direct locals, the argument can be passed directly.
+     return BitcastTaggedToWordPtr(argument);
+@@ -2615,6 +2616,20 @@
+ #endif
+   }
+ 
++  // Local<T> を C 関数の引数として値渡しする。
++  V<WordPtr> AdaptLocalArgument(V<Object> argument) {
++    V<WordPtr> value = AdaptLocalValue(argument);
++#ifdef V8_ABI_PASSES_HANDLES_BY_REFERENCE
++    // ppc32 SysV: callee は Local へのポインタを期待する。
++    V<WordPtr> handle =
++        StackSlot(sizeof(uintptr_t), alignof(uintptr_t), false);
++    StoreOffHeap(handle, value, MemoryRepresentation::UintPtr());
++    return handle;
++#else
++    return value;
++#endif
++  }
++
+   OpIndex LoadRootRegister() { return ReduceIfReachableLoadRootRegister(); }
+ 
+   OpIndex Select(OpIndex cond, OpIndex vtrue, OpIndex vfalse,
+--- a/deps/v8/src/compiler/turboshaft/fast-api-call-lowering-reducer.h
++++ b/deps/v8/src/compiler/turboshaft/fast-api-call-lowering-reducer.h
+@@ -87,7 +87,8 @@
+                       MemoryRepresentation::Int32(),
+                       offsetof(v8::FastApiCallbackOptions, fallback));
+       // data = data_argument
+-      OpIndex data_argument_to_pass = __ AdaptLocalArgument(data_argument);
++      // options.data は Local<Value> 1 word のフィールド。
++      OpIndex data_argument_to_pass = __ AdaptLocalValue(data_argument);
+       __ StoreOffHeap(stack_slot, data_argument_to_pass,
+                       MemoryRepresentation::UintPtr(),
+                       offsetof(v8::FastApiCallbackOptions, data));
