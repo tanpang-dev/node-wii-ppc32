@@ -5,11 +5,15 @@ Prebuilt Node.js 22.11.0 for Wii Linux PPC32 big-endian.
 This project distributes a standalone `node` executable. It does not require
 building Node.js on the Wii.
 
-## Current Build: `jit-r2`
+## Current Build: `jit-r3`
 
-`node-v22.11.0-wii-ppc32-jit-r2` runs with **V8 JIT enabled**, including the
+`node-v22.11.0-wii-ppc32-jit-r3` runs with **V8 JIT enabled**, including the
 Sparkplug baseline tier. Earlier builds had to be started with `--jitless`;
 this one does not.
+
+`jit-r3` fixes V8 fast API calls on PPC32. In `jit-r2`, `npm install` crashed
+with SIGSEGV after tens of thousands of fast API calls unless it was run with
+`--no-turbo-fast-api-calls`. See Fast API Calls below.
 
 The 750CL (Broadway) CPU is missing instructions that V8's PPC backend assumes,
 and V8 removed its PPC 32-bit code paths in 2024. This build restores those
@@ -22,7 +26,7 @@ rather than working around the symptoms in JavaScript. As a result:
   that `jitless-r2` needed is gone.
 - Compute-bound JavaScript is several times faster (see Measurements).
 
-The binary SHA-256 is recorded in `SHA256SUMS.node-v22.11.0-wii-ppc32-jit-r2`.
+The binary SHA-256 is recorded in `SHA256SUMS.node-v22.11.0-wii-ppc32-jit-r3`.
 The source changes are in `patches/` for review.
 
 This repository distributes a tested binary and the patches used to produce it.
@@ -37,9 +41,9 @@ verify each chunk separately:
 ```sh
 git clone --depth 1 --filter=blob:none --no-checkout --branch chunks https://github.com/tanpang-dev/node-wii-ppc32.git node22-chunks
 cd node22-chunks
-git show HEAD:install-jit-from-chunks-r2.sh > install-jit-from-chunks-r2.sh
-chmod 755 install-jit-from-chunks-r2.sh
-./install-jit-from-chunks-r2.sh /root/node22-jit-r2
+git show HEAD:install-jit-from-chunks-r3.sh > install-jit-from-chunks-r3.sh
+chmod 755 install-jit-from-chunks-r3.sh
+./install-jit-from-chunks-r3.sh /root/node22-jit-r3
 ```
 
 The installer retries each missing chunk, verifies every chunk, verifies the
@@ -48,9 +52,9 @@ replace the system Node.js installation.
 
 ## Verification
 
-`jit-r2` was validated on Wii Linux (PowerPC 750CL, 729 MHz, 73 MB RAM):
+`jit-r3` was validated on Wii Linux (PowerPC 750CL, 729 MHz, 73 MB RAM):
 
-- Node.js startup, `npm 6.14.12`
+- Node.js startup, `npm 10.9.0`, `npm install` of a real package
 - `Buffer` hex/base64/UTF-8 conversion, including multi-byte and 100 KB buffers
 - `Math.sqrt`, `floor`/`ceil`/`round`/`trunc`, int/float conversion
 - BigInt arithmetic, `Atomics` on `BigInt64Array`, `DataView` endianness
@@ -105,6 +109,49 @@ milliseconds per function. Short-lived processes lose; long-lived ones break
 even. It is enabled because it makes the tier structure correct, not because it
 is faster.
 
+## Fast API Calls
+
+Fast API calls let TurboFan call a C++ function directly instead of going
+through the generic API path. The callback receives `v8::Local<T>` **by value**:
+
+```cpp
+int32_t FastInternalModuleStat(Local<Object> unused, Local<Object> recv,
+                               const FastOneByteString&,
+                               FastApiCallbackOptions&);
+```
+
+Under the PPC32 SysV C++ ABI a pointer-sized class type is not passed in a
+register. It is passed by invisible reference: the caller stores a copy and
+passes its address. V8 knows this -- it is `ABI_PASSES_HANDLES_IN_REGS == 0` in
+`codegen/ppc/constants-ppc.h`, and the slow path in `builtins-ppc.cc` adds the
+extra indirection.
+
+The fast API call argument setup did not. `GraphAssembler::AdaptLocalArgument`
+builds one level, which is correct on x86-64 where a `Local<T>` value *is* the
+handle slot address, but one level short on PPC32. The callee then dereferenced
+the tagged value as if it were a handle slot:
+
+```
+lwz r29,0(r4)     ; recv.val_ -- should be a slot address
+mr  r4,r29        ; this
+lwz r3,0(r4)      ; *this -- dereferences the tagged value
+clrrwi r3,r3,19   ; rounds it to a 512 KB boundary
+bl  MemoryChunk::GetHeap   ; SIGSEGV once that address is unmapped
+```
+
+This is why it was non-deterministic: reading a tagged value as an address is
+harmless while it happens to land in a mapped region. Measured crash points
+ranged from 80,000 to 290,000 calls.
+
+The fix separates the two uses. `AdaptLocalValue` keeps the single level, for
+places that want the handle contents such as the `FastApiCallbackOptions::data`
+field. `AdaptLocalArgument` adds the second level on PPC32 only. The nested
+form is also GC-safe: only the inner slot holds a tagged value and is tracked,
+while the outer slot holds its fixed address.
+
+Verified on hardware: 300,000 fast API calls complete, and `npm install`
+succeeds without `--no-turbo-fast-api-calls`.
+
 ## Patches
 
 | Patch | Contents |
@@ -114,6 +161,7 @@ is faster.
 | `0003-v8-simulator-32bit-host.patch` | Lets the PPC simulator compile on a 32-bit host, which is required because V8 builds its host tools with `-m32` when the target is PPC32. |
 | `0004-v8-snapshot-header-endianness.patch` | The startup snapshot header is little-endian while its payload is target-endian. Makes the header accessors explicitly little-endian so they do not follow the target byte order. |
 | `0006-v8-enable-sparkplug-ppc32.patch` | Adds PPC32 to the two Sparkplug dispatch conditions and enables the feature. Eleven lines, most of them comments. |
+| `0007-v8-fast-api-call-ppc32-abi.patch` | Passes `v8::Local<T>` to fast API callbacks the way the PPC32 SysV C++ ABI expects. Without it, `npm install` crashes non-deterministically. |
 | `0005-build-cross-and-openssl-ppc.patch` | Cross-build configuration, and the missing OpenSSL `linux-ppc` branch. Without it, the arch selection falls back to `linux-x86_64` and bakes `-DL_ENDIAN` into a big-endian target. |
 
 ## WebAssembly
