@@ -1,0 +1,1906 @@
+--- a/configure.py
++++ b/configure.py
+@@ -1710,7 +1710,8 @@
+ def configure_v8(o, configs):
+   set_configuration_variable(configs, 'v8_enable_v8_checks', release=1, debug=0)
+ 
+-  o['variables']['v8_enable_webassembly'] = 0 if options.v8_lite_mode else 1
++  # ppc32(Wii): jump-table-assembler.h に ppc32 が無いので常に無効。
++  o['variables']['v8_enable_webassembly'] = 0
+   o['variables']['v8_enable_javascript_promise_hooks'] = 1
+   o['variables']['v8_enable_lite_mode'] = 1 if options.v8_lite_mode else 0
+   o['variables']['v8_enable_gdbjit'] = 1 if options.gdb else 0
+--- a/deps/openssl/config/Makefile
++++ b/deps/openssl/config/Makefile
+@@ -15,7 +15,7 @@
+ linux-ppc64le linux32-s390x linux64-s390x linux64-mips64\
+ solaris-x86-gcc solaris64-x86_64-gcc VC-WIN64A VC-WIN32
+ 
+-NO_ASM_ARCHS = VC-WIN64-ARM linux64-riscv64 linux64-loongarch64
++NO_ASM_ARCHS = linux-ppc VC-WIN64-ARM linux64-riscv64 linux64-loongarch64
+ 
+ CC = gcc
+ FAKE_GCC = ../config/fake_gcc.pl
+--- a/deps/openssl/openssl-cl_no_asm.gypi
++++ b/deps/openssl/openssl-cl_no_asm.gypi
+@@ -4,6 +4,8 @@
+       'includes': ['config/archs/aix64-gcc-as/no-asm/openssl-cl.gypi'],
+     }, 'target_arch=="ppc64" and OS=="linux" and node_byteorder =="little"', {
+       'includes': ['config/archs/linux-ppc64le/no-asm/openssl-cl.gypi'],
++    }, 'target_arch=="ppc" and OS=="linux"', {
++      'includes': ['config/archs/linux-ppc/no-asm/openssl-cl.gypi'],
+     }, 'target_arch=="s390x" and OS=="linux"', {
+       'includes': ['config/archs/linux64-s390x/no-asm/openssl-cl.gypi'],
+     }, 'target_arch=="arm" and OS in ("linux", "android")', {
+--- a/deps/openssl/openssl_no_asm.gypi
++++ b/deps/openssl/openssl_no_asm.gypi
+@@ -5,6 +5,8 @@
+       'includes': ['config/archs/aix64-gcc-as/no-asm/openssl.gypi'],
+     }, 'target_arch=="ppc64" and OS=="linux" and node_byteorder =="little"', {
+       'includes': ['config/archs/linux-ppc64le/no-asm/openssl.gypi'],
++    }, 'target_arch=="ppc" and OS=="linux"', {
++      'includes': ['config/archs/linux-ppc/no-asm/openssl.gypi'],
+     }, 'target_arch=="s390x" and OS=="linux"', {
+       'includes': ['config/archs/linux64-s390x/no-asm/openssl.gypi'],
+     }, 'target_arch=="arm" and OS in ("linux", "android")', {
+--- a/deps/v8/src/baseline/baseline-assembler-inl.h
++++ b/deps/v8/src/baseline/baseline-assembler-inl.h
+@@ -24,7 +24,7 @@
+ #include "src/baseline/ia32/baseline-assembler-ia32-inl.h"
+ #elif V8_TARGET_ARCH_ARM
+ #include "src/baseline/arm/baseline-assembler-arm-inl.h"
+-#elif V8_TARGET_ARCH_PPC64
++#elif V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_PPC
+ #include "src/baseline/ppc/baseline-assembler-ppc-inl.h"
+ #elif V8_TARGET_ARCH_S390X
+ #include "src/baseline/s390/baseline-assembler-s390-inl.h"
+--- a/deps/v8/src/baseline/baseline-compiler.cc
++++ b/deps/v8/src/baseline/baseline-compiler.cc
+@@ -38,7 +38,7 @@
+ #include "src/baseline/ia32/baseline-compiler-ia32-inl.h"
+ #elif V8_TARGET_ARCH_ARM
+ #include "src/baseline/arm/baseline-compiler-arm-inl.h"
+-#elif V8_TARGET_ARCH_PPC64
++#elif V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_PPC
+ #include "src/baseline/ppc/baseline-compiler-ppc-inl.h"
+ #elif V8_TARGET_ARCH_S390X
+ #include "src/baseline/s390/baseline-compiler-s390-inl.h"
+--- a/deps/v8/src/codegen/ppc/assembler-ppc.cc
++++ b/deps/v8/src/codegen/ppc/assembler-ppc.cc
+@@ -1950,6 +1950,11 @@
+   emit(EXT4 | FSQRT | frt.code() * B21 | frb.code() * B11 | rc);
+ }
+ 
++void Assembler::frsqrte(const DoubleRegister frt, const DoubleRegister frb,
++                        RCBit rc) {
++  emit(EXT4 | FRSQRTE | frt.code() * B21 | frb.code() * B11 | rc);
++}
++
+ void Assembler::fabs(const DoubleRegister frt, const DoubleRegister frb,
+                      RCBit rc) {
+   emit(EXT4 | FABS | frt.code() * B21 | frb.code() * B11 | rc);
+--- a/deps/v8/src/codegen/ppc/assembler-ppc.h
++++ b/deps/v8/src/codegen/ppc/assembler-ppc.h
+@@ -1124,6 +1124,8 @@
+              RCBit rc = LeaveRC);
+   void fsqrt(const DoubleRegister frt, const DoubleRegister frb,
+              RCBit rc = LeaveRC);
++  void frsqrte(const DoubleRegister frt, const DoubleRegister frb,
++               RCBit rc = LeaveRC);
+   void fabs(const DoubleRegister frt, const DoubleRegister frb,
+             RCBit rc = LeaveRC);
+   void fmadd(const DoubleRegister frt, const DoubleRegister fra,
+--- a/deps/v8/src/codegen/ppc/macro-assembler-ppc.cc
++++ b/deps/v8/src/codegen/ppc/macro-assembler-ppc.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include <assert.h>  // For assert
++#include <limits>    // For std::numeric_limits (SqrtDoubleSoft).
+ #include <limits.h>  // For LONG_MIN, LONG_MAX.
+ 
+ #if V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
+@@ -1247,26 +1248,106 @@
+   fsub(dst, src, kDoubleRegZero);
+ }
+ 
++// PowerPC 750 (Wii Broadway) has no 64-bit FP convert (fcfid). Build int->double
++// with the classic magic-number method instead: place the integer in the low
++// mantissa of 2^52 and subtract the bias back out.
+ void MacroAssembler::ConvertIntToDouble(Register src, DoubleRegister dst) {
++#if V8_TARGET_ARCH_PPC64
+   MovIntToDouble(dst, src, r0);
+   fcfid(dst, dst);
++#else
++  DCHECK(src != r0);
++  subi(sp, sp, Operand(kDoubleSize));
++  mov(r0, Operand(0x43300000));
++  stw(r0, MemOperand(sp, Register::kExponentOffset));
++  xoris(r0, src, Operand(0x8000));  // flip sign bit: src ^ 2^31
++  stw(r0, MemOperand(sp, Register::kMantissaOffset));
++  nop(GROUP_ENDING_NOP);
++  lfd(dst, MemOperand(sp, 0));
++  addi(sp, sp, Operand(kDoubleSize));
++  LoadDoubleLiteral(kScratchDoubleReg,
++                    base::Double(uint64_t{0x4330000080000000}), r0);
++  fsub(dst, dst, kScratchDoubleReg);
++#endif
+ }
+ 
++void MacroAssembler::SqrtDoubleSoft(DoubleRegister result, DoubleRegister src,
++                                    DoubleRegister xh, DoubleRegister tmp,
++                                    DoubleRegister cst, Register gpr) {
++  Label neg, retx, done;
++  LoadDoubleLiteral(cst, base::Double(0.0), gpr);
++  fcmpu(src, cst);
++  blt(&neg);   // x<0 -> NaN
++  beq(&retx);  // x==0(±0) -> x
++  LoadDoubleLiteral(cst, base::Double(std::numeric_limits<double>::infinity()),
++                    gpr);
++  fcmpu(src, cst);
++  beq(&retx);  // x==+inf -> x  (NaNはunordered->下へ->伝播)
++  LoadDoubleLiteral(cst, base::Double(0.5), gpr);
++  fmul(xh, src, cst);      // xh = 0.5x
++  frsqrte(result, src);    // y ~= 1/sqrt(x)
++  LoadDoubleLiteral(cst, base::Double(1.5), gpr);
++  for (int i = 0; i < 4; i++) {  // 逆数Newton-Raphson: y=y*(1.5-xh*y*y)
++    fmul(tmp, result, result);
++    fmul(tmp, tmp, xh);
++    fsub(tmp, cst, tmp);
++    fmul(result, result, tmp);
++  }
++  fmul(tmp, src, result);  // s = x*y
++  LoadDoubleLiteral(cst, base::Double(0.5), gpr);
++  fmul(result, cst, result);       // h = 0.5*y
++  fmsub(xh, tmp, tmp, src);        // xh = s*s - x
++  fneg(xh, xh);                    // xh = x - s*s = r (FMAで厳密)
++  fmadd(result, xh, result, tmp);  // result = r*h + s -> 正確丸め
++  b(&done);
++  bind(&neg);
++  LoadDoubleLiteral(
++      result, base::Double(std::numeric_limits<double>::quiet_NaN()), gpr);
++  b(&done);
++  bind(&retx);
++  fmr(result, src);
++  bind(&done);
++}
++
+ void MacroAssembler::ConvertUnsignedIntToDouble(Register src,
+                                                 DoubleRegister dst) {
++#if V8_TARGET_ARCH_PPC64
+   MovUnsignedIntToDouble(dst, src, r0);
+   fcfid(dst, dst);
++#else
++  DCHECK(src != r0);
++  subi(sp, sp, Operand(kDoubleSize));
++  mov(r0, Operand(0x43300000));
++  stw(r0, MemOperand(sp, Register::kExponentOffset));
++  stw(src, MemOperand(sp, Register::kMantissaOffset));
++  nop(GROUP_ENDING_NOP);
++  lfd(dst, MemOperand(sp, 0));
++  addi(sp, sp, Operand(kDoubleSize));
++  LoadDoubleLiteral(kScratchDoubleReg,
++                    base::Double(uint64_t{0x4330000000000000}), r0);
++  fsub(dst, dst, kScratchDoubleReg);
++#endif
+ }
+ 
+ void MacroAssembler::ConvertIntToFloat(Register src, DoubleRegister dst) {
++#if V8_TARGET_ARCH_PPC64
+   MovIntToDouble(dst, src, r0);
+   fcfids(dst, dst);
++#else
++  ConvertIntToDouble(src, dst);
++  frsp(dst, dst);
++#endif
+ }
+ 
+ void MacroAssembler::ConvertUnsignedIntToFloat(Register src,
+                                                DoubleRegister dst) {
++#if V8_TARGET_ARCH_PPC64
+   MovUnsignedIntToDouble(dst, src, r0);
+   fcfids(dst, dst);
++#else
++  ConvertUnsignedIntToDouble(src, dst);
++  frsp(dst, dst);
++#endif
+ }
+ 
+ #if V8_TARGET_ARCH_PPC64
+@@ -1302,6 +1383,7 @@
+                                           const Register dst,
+                                           const DoubleRegister double_dst,
+                                           FPRoundingMode rounding_mode) {
++#if V8_TARGET_ARCH_PPC64
+   if (rounding_mode == kRoundToZero) {
+     fctidz(double_dst, double_input);
+   } else {
+@@ -1310,11 +1392,35 @@
+     ResetRoundingMode();
+   }
+ 
+-  MovDoubleToInt64(
+-#if !V8_TARGET_ARCH_PPC64
+-      dst_hi,
++  MovDoubleToInt64(dst, double_dst);
++#else
++  // PPC 750 (Wii) has no fctidz/fctid. Range-check against int32 bounds,
++  // then use fctiwz (32-bit truncate) for the in-range case. dst/dst_hi
++  // are set so TestIfInt32(dst_hi, dst, ...) reports overflow correctly.
++  DCHECK_EQ(rounding_mode, kRoundToZero);
++  Label overflow, done;
++  fcmpu(double_input, double_input);
++  b(unordered, &overflow);
++  LoadDoubleLiteral(double_dst, base::Double(-2147483649.0), r0);
++  fcmpu(double_input, double_dst);
++  ble(&overflow);
++  LoadDoubleLiteral(double_dst, base::Double(2147483648.0), r0);
++  fcmpu(double_input, double_dst);
++  bge(&overflow);
++
++  fctiwz(double_dst, double_input);
++  subi(sp, sp, Operand(kDoubleSize));
++  stfd(double_dst, MemOperand(sp, 0));
++  lwz(dst, MemOperand(sp, Register::kMantissaOffset));
++  addi(sp, sp, Operand(kDoubleSize));
++  srawi(dst_hi, dst, 31);
++  b(&done);
++
++  bind(&overflow);
++  li(dst, Operand::Zero());
++  li(dst_hi, Operand(1));
++  bind(&done);
+ #endif
+-      dst, double_dst);
+ }
+ 
+ #if V8_TARGET_ARCH_PPC64
+@@ -3344,9 +3450,13 @@
+ void MacroAssembler::MovIntToFloat(DoubleRegister dst, Register src,
+                                    Register scratch) {
+   if (CpuFeatures::IsSupported(PPC_8_PLUS)) {
++#if V8_TARGET_ARCH_PPC64
+     ShiftLeftU64(scratch, src, Operand(32));
+     mtfprd(dst, scratch);
+     xscvspdpn(dst, dst);
++#else
++    UNREACHABLE();
++#endif
+     return;
+   }
+   subi(sp, sp, Operand(kFloatSize));
+@@ -3359,8 +3469,12 @@
+ void MacroAssembler::MovFloatToInt(Register dst, DoubleRegister src,
+                                    DoubleRegister scratch) {
+   if (CpuFeatures::IsSupported(PPC_8_PLUS)) {
++#if V8_TARGET_ARCH_PPC64
+     xscvdpspn(scratch, src);
+     mffprwz(dst, scratch);
++#else
++    UNREACHABLE();
++#endif
+     return;
+   }
+   subi(sp, sp, Operand(kFloatSize));
+@@ -3430,35 +3544,59 @@
+     mulli(dst, src, value);
+   } else {
+     mov(scratch, value);
+-    mulld(dst, src, scratch, s, r);
++  #if V8_TARGET_ARCH_PPC64
++  mulld(dst, src, scratch, s, r);
++#else
++  mullw(dst, src, scratch, s, r);
++#endif
+   }
+ }
+ 
+ void MacroAssembler::MulS64(Register dst, Register src, Register value, OEBit s,
+                             RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   mulld(dst, src, value, s, r);
++#else
++  mullw(dst, src, value, s, r);
++#endif
+ }
+ 
+ void MacroAssembler::MulS32(Register dst, Register src, const Operand& value,
+                             Register scratch, OEBit s, RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   MulS64(dst, src, value, scratch, s, r);
+   extsw(dst, dst, r);
++#else
++  MulS64(dst, src, value, scratch, s, r);
++#endif
+ }
+ 
+ void MacroAssembler::MulS32(Register dst, Register src, Register value, OEBit s,
+                             RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   MulS64(dst, src, value, s, r);
+   extsw(dst, dst, r);
++#else
++  MulS64(dst, src, value, s, r);
++#endif
+ }
+ 
+ void MacroAssembler::DivS64(Register dst, Register src, Register value, OEBit s,
+                             RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   divd(dst, src, value, s, r);
++#else
++  divw(dst, src, value, s, r);
++#endif
+ }
+ 
+ void MacroAssembler::DivU64(Register dst, Register src, Register value, OEBit s,
+                             RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   divdu(dst, src, value, s, r);
++#else
++  divwu(dst, src, value, s, r);
++#endif
+ }
+ 
+ void MacroAssembler::DivS32(Register dst, Register src, Register value, OEBit s,
+@@ -3478,8 +3616,13 @@
+   } else {
+     Register scratch = GetRegisterThatIsNotOneOf(dst, src, value);
+     Push(scratch);
++#if V8_TARGET_ARCH_PPC64
+     divd(scratch, src, value);
+     mulld(scratch, scratch, value);
++#else
++    divw(scratch, src, value);
++    mullw(scratch, scratch, value);
++#endif
+     sub(dst, src, scratch);
+     Pop(scratch);
+   }
+@@ -3491,8 +3634,13 @@
+   } else {
+     Register scratch = GetRegisterThatIsNotOneOf(dst, src, value);
+     Push(scratch);
++#if V8_TARGET_ARCH_PPC64
+     divdu(scratch, src, value);
+     mulld(scratch, scratch, value);
++#else
++    divwu(scratch, src, value);
++    mullw(scratch, scratch, value);
++#endif
+     sub(dst, src, scratch);
+     Pop(scratch);
+   }
+@@ -3608,17 +3756,29 @@
+ 
+ void MacroAssembler::ShiftLeftU64(Register dst, Register src,
+                                   const Operand& value, RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   sldi(dst, src, value, r);
++#else
++  slwi(dst, src, value, r);
++#endif
+ }
+ 
+ void MacroAssembler::ShiftRightU64(Register dst, Register src,
+                                    const Operand& value, RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   srdi(dst, src, value, r);
++#else
++  srwi(dst, src, value, r);
++#endif
+ }
+ 
+ void MacroAssembler::ShiftRightS64(Register dst, Register src,
+                                    const Operand& value, RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   sradi(dst, src, value.immediate(), r);
++#else
++  srawi(dst, src, value.immediate(), r);
++#endif
+ }
+ 
+ void MacroAssembler::ShiftLeftU32(Register dst, Register src,
+@@ -3638,17 +3798,29 @@
+ 
+ void MacroAssembler::ShiftLeftU64(Register dst, Register src, Register value,
+                                   RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   sld(dst, src, value, r);
++#else
++  slw(dst, src, value, r);
++#endif
+ }
+ 
+ void MacroAssembler::ShiftRightU64(Register dst, Register src, Register value,
+                                    RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   srd(dst, src, value, r);
++#else
++  srw(dst, src, value, r);
++#endif
+ }
+ 
+ void MacroAssembler::ShiftRightS64(Register dst, Register src, Register value,
+                                    RCBit r) {
++#if V8_TARGET_ARCH_PPC64
+   srad(dst, src, value, r);
++#else
++  sraw(dst, src, value, r);
++#endif
+ }
+ 
+ void MacroAssembler::ShiftLeftU32(Register dst, Register src, Register value,
+@@ -3968,9 +4140,15 @@
+     }                                                                         \
+   }
+ 
++#if V8_TARGET_ARCH_PPC64
+ #define MEM_OP_WITH_ALIGN_LIST(V) \
+   V(LoadU64WithUpdate, ldu, ldux) \
+   V(StoreU64WithUpdate, stdu, stdux)
++#else
++#define MEM_OP_WITH_ALIGN_LIST(V)   \
++  V(LoadU64WithUpdate, lwzu, lwzux) \
++  V(StoreU64WithUpdate, stwu, stwux)
++#endif
+ 
+ #define MEM_OP_WITH_ALIGN_FUNCTION(name, ri_op, rr_op)           \
+   void MacroAssembler::name(Register reg, const MemOperand& mem, \
+@@ -3981,10 +4159,17 @@
+ #undef MEM_OP_WITH_ALIGN_LIST
+ #undef MEM_OP_WITH_ALIGN_FUNCTION
+ 
++#if V8_TARGET_ARCH_PPC64
+ #define MEM_OP_WITH_ALIGN_PREFIXED_LIST(V) \
+   V(LoadS32, lwa, plwa, lwax)              \
+   V(LoadU64, ld, pld, ldx)                 \
+   V(StoreU64, std, pstd, stdx)
++#else
++#define MEM_OP_WITH_ALIGN_PREFIXED_LIST(V) \
++  V(LoadS32, lwz, lwz, lwzx)               \
++  V(LoadU64, lwz, lwz, lwzx)               \
++  V(StoreU64, stw, stw, stwx)
++#endif
+ 
+ #define MEM_OP_WITH_ALIGN_PREFIXED_FUNCTION(name, ri_op, rip_op, rr_op)       \
+   void MacroAssembler::name(Register reg, const MemOperand& mem,              \
+@@ -4444,7 +4629,11 @@
+ void MacroAssembler::F64x2Splat(Simd128Register dst, DoubleRegister src,
+                                 Register scratch) {
+   constexpr int lane_width_in_bytes = 8;
++#if V8_TARGET_ARCH_PPC64
+   MovDoubleToInt64(scratch, src);
++#else
++  UNREACHABLE();
++#endif
+   mtvsrd(dst, scratch);
+   vinsertd(dst, dst, Operand(1 * lane_width_in_bytes));
+ }
+@@ -4484,7 +4673,11 @@
+   constexpr int lane_width_in_bytes = 8;
+   vextractd(scratch1, src, Operand((1 - imm_lane_idx) * lane_width_in_bytes));
+   mfvsrd(scratch2, scratch1);
++#if V8_TARGET_ARCH_PPC64
+   MovInt64ToDouble(dst, scratch2);
++#else
++  UNREACHABLE();
++#endif
+ }
+ 
+ void MacroAssembler::F32x4ExtractLane(DoubleRegister dst, Simd128Register src,
+@@ -4550,7 +4743,11 @@
+   if (src1 != dst) {
+     vor(dst, src1, src1);
+   }
++#if V8_TARGET_ARCH_PPC64
+   MovDoubleToInt64(scratch1, src2);
++#else
++  UNREACHABLE();
++#endif
+   if (CpuFeatures::IsSupported(PPC_10_PLUS)) {
+     vinsd(dst, scratch1, Operand((1 - imm_lane_idx) * lane_width_in_bytes));
+   } else {
+@@ -4647,7 +4844,11 @@
+       }
+       mfvsrd(scratch_1, src1);
+       mfvsrd(scratch_2, src2);
+-      mulld(scratch_1, scratch_1, scratch_2);
++    #if V8_TARGET_ARCH_PPC64
++  mulld(scratch_1, scratch_1, scratch_2);
++#else
++  UNREACHABLE();
++#endif
+       scratch_1 = scratch2;
+       scratch_2 = scratch3;
+     }
+@@ -5515,10 +5716,14 @@
+     brd(dst, val);
+     return;
+   }
++#if V8_TARGET_ARCH_PPC64
+   subi(sp, sp, Operand(kSystemPointerSize));
+   std(val, MemOperand(sp));
+   ldbrx(dst, MemOperand(r0, sp));
+   addi(sp, sp, Operand(kSystemPointerSize));
++#else
++  UNREACHABLE();
++#endif
+ }
+ 
+ void MacroAssembler::JumpIfEqual(Register x, int32_t y, Label* dest) {
+@@ -5533,7 +5738,9 @@
+ 
+ void MacroAssembler::LoadEntryFromBuiltinIndex(Register builtin_index,
+                                                Register target) {
++#if V8_TARGET_ARCH_PPC64
+   static_assert(kSystemPointerSize == 8);
++#endif
+   static_assert(kSmiTagSize == 1);
+   static_assert(kSmiTag == 0);
+ 
+@@ -5696,15 +5903,28 @@
+ }
+ 
+ void MacroAssembler::ZeroExtByte(Register dst, Register src) {
++#if V8_TARGET_ARCH_PPC64
+   clrldi(dst, src, Operand(56));
++#else
++  clrlwi(dst, src, Operand(24));
++#endif
+ }
+ 
+ void MacroAssembler::ZeroExtHalfWord(Register dst, Register src) {
++#if V8_TARGET_ARCH_PPC64
+   clrldi(dst, src, Operand(48));
++#else
++  clrlwi(dst, src, Operand(16));
++#endif
+ }
+ 
+ void MacroAssembler::ZeroExtWord32(Register dst, Register src) {
++#if V8_TARGET_ARCH_PPC64
+   clrldi(dst, src, Operand(32));
++#else
++  // 32bitではレジスタ全体が32bit。ゼロ拡張は不要。
++  if (dst != src) mr(dst, src);
++#endif
+ }
+ 
+ void MacroAssembler::Trap() { stop(); }
+@@ -5712,7 +5932,9 @@
+ 
+ void MacroAssembler::Popcnt32(Register dst, Register src) { popcntw(dst, src); }
+ 
++#if V8_TARGET_ARCH_PPC64
+ void MacroAssembler::Popcnt64(Register dst, Register src) { popcntd(dst, src); }
++#endif
+ 
+ void MacroAssembler::CountLeadingZerosU32(Register dst, Register src, RCBit r) {
+   cntlzw(dst, src, r);
+@@ -5731,7 +5953,7 @@
+   bind(&loop); /* while ((src & 1) == 0) */                       \
+   andi(scratch2, scratch1, Operand(1));                           \
+   bne(&done, cr0);                                                \
+-  srdi(scratch1, scratch1, Operand(1)); /* src >>= 1;*/           \
++  ShiftRightU64(scratch1, scratch1, Operand(1)); /* src >>= 1;*/      \
+   addi(dst, dst, Operand(1));           /* dst++ */               \
+   bdnz(&loop);                                                    \
+   bind(&done);
+@@ -5758,9 +5980,13 @@
+ 
+ void MacroAssembler::ClearByteU64(Register dst, int byte_idx) {
+   CHECK(0 <= byte_idx && byte_idx <= 7);
++#if V8_TARGET_ARCH_PPC64
+   int shift = byte_idx*8;
+   rldicl(dst, dst, shift, 8);
+   rldicl(dst, dst, 64-shift, 0);
++#else
++  UNREACHABLE();
++#endif
+ }
+ 
+ void MacroAssembler::ReverseBitsU64(Register dst, Register src,
+@@ -5795,9 +6021,15 @@
+     // (j*8+i+1):end of scratch1
+     int shift = 7 - (2*i);
+     if (shift < 0) shift += 64;
++#if V8_TARGET_ARCH_PPC64
+     rldicr(scratch1, src, shift, j*8+i);
++#else
++    UNREACHABLE();
++#endif
+     // erase bits start:(j*8-1+i) of scratch1 (inclusive)
++#if V8_TARGET_ARCH_PPC64
+     rldicl(scratch1, scratch1, 0, j*8+i);
++#endif
+     // scratch2 = scratch2|scratch1
+     orx(scratch2, scratch2, scratch1);
+   }
+--- a/deps/v8/src/codegen/ppc/macro-assembler-ppc.h
++++ b/deps/v8/src/codegen/ppc/macro-assembler-ppc.h
+@@ -60,6 +60,12 @@
+   // Converts the integer (untagged smi) in |src| to a double, storing
+   // the result to |dst|
+   void ConvertIntToDouble(Register src, DoubleRegister dst);
++
++  // sqrt(src) をソフト実装 (750CLはfsqrt非搭載)。frsqrte+逆数NR+FMA補正。
++  // result!=src、xh/tmp/cst/result/src は全て相異なること。gprはリテラル用。
++  void SqrtDoubleSoft(DoubleRegister result, DoubleRegister src,
++                      DoubleRegister xh, DoubleRegister tmp,
++                      DoubleRegister cst, Register gpr);
+ 
+   // Converts the unsigned integer (untagged smi) in |src| to
+   // a double, storing the result to |dst|
+@@ -1102,7 +1108,8 @@
+   // Pointer compression Support
+ 
+   void SmiToPtrArrayOffset(Register dst, Register src) {
+-#if defined(V8_COMPRESS_POINTERS) || defined(V8_31BIT_SMIS_ON_64BIT_ARCH)
++#if defined(V8_COMPRESS_POINTERS) || defined(V8_31BIT_SMIS_ON_64BIT_ARCH) || \
++    !V8_TARGET_ARCH_PPC64
+     static_assert(kSmiTag == 0 && kSmiShift < kSystemPointerSizeLog2);
+     ShiftLeftU64(dst, src, Operand(kSystemPointerSizeLog2 - kSmiShift));
+ #else
+@@ -1845,7 +1852,8 @@
+     bne(not_smi_label, cr0);
+   }
+ 
+-#if !defined(V8_COMPRESS_POINTERS) && !defined(V8_31BIT_SMIS_ON_64BIT_ARCH)
++#if !defined(V8_COMPRESS_POINTERS) && !defined(V8_31BIT_SMIS_ON_64BIT_ARCH) && \
++    V8_TARGET_ARCH_PPC64
+   // Ensure it is permissible to read/write int value directly from
+   // upper half of the smi.
+   static_assert(kSmiTag == 0);
+--- a/deps/v8/src/codegen/ppc/register-ppc.h
++++ b/deps/v8/src/codegen/ppc/register-ppc.h
+@@ -93,7 +93,7 @@
+ const int kNumRequiredStackFrameSlots = 12;
+ const int kStackFrameLRSlot = 2;
+ const int kStackFrameExtraParamSlot = 12;
+-#else  // AIX
++#elif V8_OS_AIX || V8_TARGET_ARCH_PPC64  // AIX / ppc64 ELFv1
+ // [0] back chain
+ // [1] condition register save area
+ // [2] link register save area
+@@ -105,9 +105,21 @@
+ // [13] Parameter8 save area
+ // [14] Parameter9 slot (if necessary)
+ // ...
++#if V8_TARGET_ARCH_PPC64
+ const int kNumRequiredStackFrameSlots = 14;
++#else
++const int kNumRequiredStackFrameSlots = 16;
++#endif
+ const int kStackFrameLRSlot = 2;
+ const int kStackFrameExtraParamSlot = 14;
++#else  // ppc32 Linux (SysV ABI)
++// [0] back chain
++// [1] link register save area
++// [2] Parameter9 slot (if necessary)
++// ...
++const int kNumRequiredStackFrameSlots = 4;
++const int kStackFrameLRSlot = 1;
++const int kStackFrameExtraParamSlot = 2;
+ #endif
+ 
+ enum RegisterCode {
+--- a/deps/v8/src/common/globals.h
++++ b/deps/v8/src/common/globals.h
+@@ -315,6 +315,13 @@
+ #define V8_ENABLE_FP_PARAMS_IN_C_LINKAGE 1
+ #endif
+ 
++// C++ ABI が pointer 幅の class type (v8::Local<T>) をレジスタではなく
++// invisible reference で渡すプラットフォーム。ppc32 SysV がこれに当たる
++// (codegen/ppc/constants-ppc.h の ABI_PASSES_HANDLES_IN_REGS==0 と同条件)。
++#if V8_TARGET_ARCH_PPC && !V8_TARGET_ARCH_PPC64
++#define V8_ABI_PASSES_HANDLES_BY_REFERENCE 1
++#endif
++
+ // Superclass for classes only using static method functions.
+ // The subclass of AllStatic cannot be instantiated at all.
+ class AllStatic {
+--- a/deps/v8/src/compiler/backend/instruction-codes.h
++++ b/deps/v8/src/compiler/backend/instruction-codes.h
+@@ -418,7 +418,9 @@
+ // back fixes that add new opcodes.
+ // It is OK to temporarily reduce the required slack if we have a tracking bug
+ // to reduce the number of used opcodes again.
+-static_assert(ArchOpcodeField::kMax - kLastArchOpcode >= 16,
++// ppc32: Int32Pair/Word32AtomicPair を足した分、残り枠が 16 を切る
++// (実測 10)。encoding 上限 (kMax=511) には余裕があるので警告値を下げる。
++static_assert(ArchOpcodeField::kMax - kLastArchOpcode >= 8,
+               "We are running close to the number of available opcodes.");
+ 
+ }  // namespace compiler
+--- a/deps/v8/src/compiler/backend/instruction-selector.cc
++++ b/deps/v8/src/compiler/backend/instruction-selector.cc
+@@ -2140,7 +2140,8 @@
+ VISIT_UNSUPPORTED_OP(BitcastWord32PairToFloat64)
+ #endif  // V8_TARGET_ARCH_64_BIT
+ 
+-#if !V8_TARGET_ARCH_IA32 && !V8_TARGET_ARCH_ARM && !V8_TARGET_ARCH_RISCV32
++#if !V8_TARGET_ARCH_IA32 && !V8_TARGET_ARCH_ARM && !V8_TARGET_ARCH_RISCV32 && \
++    !V8_TARGET_ARCH_PPC
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitWord32AtomicPairLoad(node_t node) {
+   UNIMPLEMENTED();
+--- a/deps/v8/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/deps/v8/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -1667,9 +1667,34 @@
+     case kPPC_AbsDouble:
+       ASSEMBLE_FLOAT_UNOP_RC(fabs, 0);
+       break;
+-    case kPPC_SqrtDouble:
++    case kPPC_SqrtDouble: {
++#if V8_TARGET_ARCH_PPC64
+       ASSEMBLE_FLOAT_UNOP_RC(fsqrt, MiscField::decode(instr->opcode()));
++#else
++      // 750CLはfsqrt非搭載。src/dstと重複しないFP3本をスタック退避して
++      // SqrtDoubleSoft(frsqrte+NR+FMA)で計算する。
++      DoubleRegister src = i.InputDoubleRegister(0);
++      DoubleRegister dst = i.OutputDoubleRegister();
++      DoubleRegister sc[3] = {d1, d1, d1};  // 既定コンストラクタ無し→ダミー初期化
++      int n = 0;
++      for (int code = 1; code <= 12 && n < 3; ++code) {
++        DoubleRegister r = DoubleRegister::from_code(code);
++        if (r != src && r != dst) sc[n++] = r;
++      }
++      __ subi(sp, sp, Operand(3 * kDoubleSize));
++      __ stfd(sc[0], MemOperand(sp, 0));
++      __ stfd(sc[1], MemOperand(sp, kDoubleSize));
++      __ stfd(sc[2], MemOperand(sp, 2 * kDoubleSize));
++      __ SqrtDoubleSoft(sc[0], src, sc[1], sc[2], kScratchDoubleReg, r0);
++      __ fmr(dst, sc[0]);
++      if (MiscField::decode(instr->opcode())) __ frsp(dst, dst);  // Float32
++      __ lfd(sc[0], MemOperand(sp, 0));
++      __ lfd(sc[1], MemOperand(sp, kDoubleSize));
++      __ lfd(sc[2], MemOperand(sp, 2 * kDoubleSize));
++      __ addi(sp, sp, Operand(3 * kDoubleSize));
++#endif
+       break;
++    }
+     case kPPC_FloorDouble:
+       ASSEMBLE_FLOAT_UNOP_RC(frim, MiscField::decode(instr->opcode()));
+       break;
+@@ -2143,7 +2168,98 @@
+       __ AtomicExchange<int8_t>(
+           MemOperand(i.InputRegister(0), i.InputRegister(1)),
+           i.InputRegister(2), i.OutputRegister());
++      break;
++#if !V8_TARGET_ARCH_PPC64
++    // --- 64bitアトミック(ppc32では非アトミック; 上のコメント参照) ---------
++    // BEのため 上位=+0 / 下位=+4。
++    case kPPC_AtomicPairLoad: {
++      Register base = i.InputRegister(0);
++      Register index = i.InputRegister(1);
++      __ add(kScratchReg, base, index);
++      if (instr->OutputCount() > 1) {
++        __ lwz(i.OutputRegister(1), MemOperand(kScratchReg, 0));  // 上位
++      }
++      __ lwz(i.OutputRegister(0), MemOperand(kScratchReg, 4));    // 下位
++      break;
++    }
++    case kPPC_AtomicPairStore: {
++      Register base = i.InputRegister(0);
++      Register index = i.InputRegister(1);
++      __ add(kScratchReg, base, index);
++      __ stw(i.InputRegister(3), MemOperand(kScratchReg, 0));  // 上位
++      __ stw(i.InputRegister(2), MemOperand(kScratchReg, 4));  // 下位
++      break;
++    }
++#define ATOMIC_PAIR_BINOP(op_lo, op_hi)                                  \
++  {                                                                      \
++    Register base = i.InputRegister(0);                                  \
++    Register index = i.InputRegister(1);                                 \
++    Register val_lo = i.InputRegister(2);                                \
++    Register val_hi = i.InputRegister(3);                                \
++    Register old_lo = i.OutputRegister(0);                               \
++    Register old_hi = i.OutputRegister(1);                               \
++    Register new_lo = i.TempRegister(0);                                 \
++    Register new_hi = i.TempRegister(1);                                 \
++    __ add(kScratchReg, base, index);                                    \
++    __ lwz(old_hi, MemOperand(kScratchReg, 0));                          \
++    __ lwz(old_lo, MemOperand(kScratchReg, 4));                          \
++    op_lo;                                                               \
++    op_hi;                                                               \
++    __ stw(new_hi, MemOperand(kScratchReg, 0));                          \
++    __ stw(new_lo, MemOperand(kScratchReg, 4));                          \
++    break;                                                               \
++  }
++    case kPPC_AtomicPairAdd:
++      ATOMIC_PAIR_BINOP(__ addc(new_lo, old_lo, val_lo),
++                        __ adde(new_hi, old_hi, val_hi))
++    case kPPC_AtomicPairSub:
++      ATOMIC_PAIR_BINOP(__ subc(new_lo, old_lo, val_lo),
++                        __ sube(new_hi, old_hi, val_hi))
++    case kPPC_AtomicPairAnd:
++      ATOMIC_PAIR_BINOP(__ and_(new_lo, old_lo, val_lo),
++                        __ and_(new_hi, old_hi, val_hi))
++    case kPPC_AtomicPairOr:
++      ATOMIC_PAIR_BINOP(__ orx(new_lo, old_lo, val_lo),
++                        __ orx(new_hi, old_hi, val_hi))
++    case kPPC_AtomicPairXor:
++      ATOMIC_PAIR_BINOP(__ xor_(new_lo, old_lo, val_lo),
++                        __ xor_(new_hi, old_hi, val_hi))
++#undef ATOMIC_PAIR_BINOP
++    case kPPC_AtomicPairExchange: {
++      Register base = i.InputRegister(0);
++      Register index = i.InputRegister(1);
++      Register val_lo = i.InputRegister(2);
++      Register val_hi = i.InputRegister(3);
++      __ add(kScratchReg, base, index);
++      __ lwz(i.OutputRegister(1), MemOperand(kScratchReg, 0));
++      __ lwz(i.OutputRegister(0), MemOperand(kScratchReg, 4));
++      __ stw(val_hi, MemOperand(kScratchReg, 0));
++      __ stw(val_lo, MemOperand(kScratchReg, 4));
+       break;
++    }
++    case kPPC_AtomicPairCompareExchange: {
++      Label exit;
++      Register base = i.InputRegister(0);
++      Register index = i.InputRegister(1);
++      Register exp_lo = i.InputRegister(2);
++      Register exp_hi = i.InputRegister(3);
++      Register new_lo = i.InputRegister(4);
++      Register new_hi = i.InputRegister(5);
++      Register old_lo = i.OutputRegister(0);
++      Register old_hi = i.OutputRegister(1);
++      __ add(kScratchReg, base, index);
++      __ lwz(old_hi, MemOperand(kScratchReg, 0));
++      __ lwz(old_lo, MemOperand(kScratchReg, 4));
++      __ cmp(old_hi, exp_hi);
++      __ bne(&exit);
++      __ cmp(old_lo, exp_lo);
++      __ bne(&exit);
++      __ stw(new_hi, MemOperand(kScratchReg, 0));
++      __ stw(new_lo, MemOperand(kScratchReg, 4));
++      __ bind(&exit);
++      break;
++    }
++#endif  // !V8_TARGET_ARCH_PPC64
+     case kPPC_AtomicExchangeUint8:
+       __ AtomicExchange<uint8_t>(
+           MemOperand(i.InputRegister(0), i.InputRegister(1)),
+@@ -2261,6 +2377,7 @@
+         __ brd(output, input);
+         break;
+       }
++#if V8_TARGET_ARCH_PPC64
+       __ rldicl(temp1, input, 32, 32);
+       __ rotlwi(temp2, input, 8);
+       __ rlwimi(temp2, input, 24, 0, 7);
+@@ -2270,6 +2387,9 @@
+       __ rlwimi(temp3, temp1, 24, 16, 23);
+       __ rldicr(temp2, temp2, 32, 31);
+       __ orx(output, temp2, temp3);
++#else
++      UNREACHABLE();
++#endif
+       break;
+     }
+     case kPPC_LoadByteRev64: {
+@@ -3234,6 +3354,7 @@
+         // If the wrapper is running on a secondary stack, it will switch to the
+         // central stack and fill these slots with the central stack pointer and
+         // secondary stack limit. Otherwise the slots remain empty.
++#if V8_TARGET_ARCH_PPC64
+ #if V8_EMBEDDED_CONSTANT_POOL_BOOL
+         static_assert(WasmImportWrapperFrameConstants::kCentralStackSPOffset ==
+                       -32);
+@@ -3245,6 +3366,7 @@
+         static_assert(
+             WasmImportWrapperFrameConstants::kSecondaryStackLimitOffset == -32);
+ #endif
++#endif
+         __ mov(r0, Operand(0));
+         __ push(r0);
+         __ push(r0);
+--- a/deps/v8/src/compiler/backend/ppc/instruction-codes-ppc.h
++++ b/deps/v8/src/compiler/backend/ppc/instruction-codes-ppc.h
+@@ -141,6 +141,15 @@
+   V(PPC_StoreSimd128)                \
+   V(PPC_ByteRev32)                   \
+   V(PPC_ByteRev64)                   \
++  V(PPC_AtomicPairLoad)                     \
++  V(PPC_AtomicPairStore)                    \
++  V(PPC_AtomicPairAdd)                      \
++  V(PPC_AtomicPairSub)                      \
++  V(PPC_AtomicPairAnd)                      \
++  V(PPC_AtomicPairOr)                       \
++  V(PPC_AtomicPairXor)                      \
++  V(PPC_AtomicPairExchange)                 \
++  V(PPC_AtomicPairCompareExchange)          \
+   V(PPC_AtomicExchangeUint8)         \
+   V(PPC_AtomicExchangeUint16)        \
+   V(PPC_AtomicExchangeWord32)        \
+--- a/deps/v8/src/compiler/backend/ppc/instruction-scheduler-ppc.cc
++++ b/deps/v8/src/compiler/backend/ppc/instruction-scheduler-ppc.cc
+@@ -367,6 +367,15 @@
+     case kPPC_S128Store64Lane:
+       return kHasSideEffect;
+ 
++    case kPPC_AtomicPairLoad:
++    case kPPC_AtomicPairStore:
++    case kPPC_AtomicPairAdd:
++    case kPPC_AtomicPairSub:
++    case kPPC_AtomicPairAnd:
++    case kPPC_AtomicPairOr:
++    case kPPC_AtomicPairXor:
++    case kPPC_AtomicPairExchange:
++    case kPPC_AtomicPairCompareExchange:
+     case kPPC_AtomicExchangeUint8:
+     case kPPC_AtomicExchangeUint16:
+     case kPPC_AtomicExchangeWord32:
+--- a/deps/v8/src/compiler/backend/ppc/instruction-selector-ppc.cc
++++ b/deps/v8/src/compiler/backend/ppc/instruction-selector-ppc.cc
+@@ -264,15 +264,27 @@
+       case MachineRepresentation::kTagged:
+         opcode = kPPC_LoadDecompressTagged;
+         break;
+-#else
++#elif V8_TARGET_ARCH_PPC64
+       case MachineRepresentation::kTaggedSigned:   // Fall through.
+       case MachineRepresentation::kTaggedPointer:  // Fall through.
+       case MachineRepresentation::kTagged:         // Fall through.
++#else
++      // ppc32: tagged は4バイトなので32bitロードで読む(Node 10 と同じ)。
++      case MachineRepresentation::kTaggedSigned:   // Fall through.
++      case MachineRepresentation::kTaggedPointer:  // Fall through.
++      case MachineRepresentation::kTagged:
++        opcode = kPPC_LoadWordU32;
++        break;
+ #endif
+       case MachineRepresentation::kWord64:
++#if V8_TARGET_ARCH_PPC64
+         opcode = kPPC_LoadWord64;
+         if (mode != kInt34Imm) mode = kInt16Imm_4ByteAligned;
+         break;
++#else
++        // 32bitに64bitロードは無い。Int64Lowering がペアへ分解する。
++        UNREACHABLE();
++#endif
+       case MachineRepresentation::kSimd128:
+         opcode = kPPC_LoadSimd128;
+         // Vectors do not support MRI mode, only MRR is available.
+@@ -1554,7 +1566,223 @@
+   PPCOperandGeneratorT<Adapter> g(this);
+   Emit(kPPC_LoadReverseSimd128RR, g.DefineAsRegister(node),
+        g.UseRegister(this->input_at(node, 0)));
++}
++
++#if !V8_TARGET_ARCH_PPC64
++namespace {
++// 32bitでは64bit演算を low/high の2レジスタで行う。上位ワードが使われない
++// 場合は通常の32bit命令にフォールバックする(Node 14 の実装を現行APIへ移植)。
++template <typename Adapter>
++void VisitPairBinop(InstructionSelectorT<Adapter>* selector,
++                    InstructionCode opcode, InstructionCode opcode2,
++                    typename Adapter::node_t node) {
++  PPCOperandGeneratorT<Adapter> g(selector);
++
++  typename Adapter::node_t projection1 = selector->FindProjection(node, 1);
++  if (selector->valid(projection1)) {
++    // 出力レジスタと入力が重ならないよう UseUniqueRegister を使う。
++    InstructionOperand inputs[] = {
++        g.UseRegister(selector->input_at(node, 0)),
++        g.UseUniqueRegister(selector->input_at(node, 1)),
++        g.UseRegister(selector->input_at(node, 2)),
++        g.UseUniqueRegister(selector->input_at(node, 3))};
++
++    InstructionOperand outputs[] = {g.DefineAsRegister(node),
++                                    g.DefineAsRegister(projection1)};
++
++    selector->Emit(opcode, 2, outputs, 4, inputs);
++  } else {
++    // 上位ワードは使われないので普通の32bit命令で足りる。
++    selector->Emit(opcode2, g.DefineSameAsFirst(node),
++                   g.UseRegister(selector->input_at(node, 0)),
++                   g.UseRegister(selector->input_at(node, 2)));
++  }
++}
++
++template <typename Adapter>
++void VisitPairShift(InstructionSelectorT<Adapter>* selector,
++                    InstructionCode opcode, typename Adapter::node_t node) {
++  PPCOperandGeneratorT<Adapter> g(selector);
++  // 入出力のレジスタが重ならないことを保証するため UseUniqueRegister を使う。
++  InstructionOperand shift_operand;
++  typename Adapter::node_t shift_by = selector->input_at(node, 2);
++  if (selector->is_integer_constant(shift_by)) {
++    shift_operand = g.UseImmediate(shift_by);
++  } else {
++    shift_operand = g.UseUniqueRegister(shift_by);
++  }
++
++  InstructionOperand inputs[] = {
++      g.UseUniqueRegister(selector->input_at(node, 0)),
++      g.UseUniqueRegister(selector->input_at(node, 1)), shift_operand};
++
++  typename Adapter::node_t projection1 = selector->FindProjection(node, 1);
++
++  InstructionOperand outputs[2];
++  InstructionOperand temps[1];
++  int32_t output_count = 0;
++  int32_t temp_count = 0;
++
++  outputs[output_count++] = g.DefineAsRegister(node);
++  if (selector->valid(projection1)) {
++    outputs[output_count++] = g.DefineAsRegister(projection1);
++  } else {
++    temps[temp_count++] = g.TempRegister();
++  }
++
++  selector->Emit(opcode, output_count, outputs, 3, inputs, temp_count, temps);
++}
++}  // namespace
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitInt32PairAdd(node_t node) {
++  VisitPairBinop(this, kPPC_AddPair, kPPC_Add32, node);
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitInt32PairSub(node_t node) {
++  VisitPairBinop(this, kPPC_SubPair, kPPC_Sub, node);
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitInt32PairMul(node_t node) {
++  PPCOperandGeneratorT<Adapter> g(this);
++  node_t projection1 = this->FindProjection(node, 1);
++  if (this->valid(projection1)) {
++    InstructionOperand inputs[] = {g.UseUniqueRegister(this->input_at(node, 0)),
++                                   g.UseUniqueRegister(this->input_at(node, 1)),
++                                   g.UseUniqueRegister(this->input_at(node, 2)),
++                                   g.UseUniqueRegister(this->input_at(node, 3))};
++
++    InstructionOperand outputs[] = {g.DefineAsRegister(node),
++                                    g.DefineAsRegister(projection1)};
++
++    InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
++
++    Emit(kPPC_MulPair, 2, outputs, 4, inputs, 2, temps);
++  } else {
++    // 上位ワードは使われないので普通の32bit乗算で足りる。
++    Emit(kPPC_Mul32, g.DefineSameAsFirst(node),
++         g.UseRegister(this->input_at(node, 0)),
++         g.UseRegister(this->input_at(node, 2)));
++  }
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitWord32PairShl(node_t node) {
++  VisitPairShift(this, kPPC_ShiftLeftPair, node);
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitWord32PairShr(node_t node) {
++  VisitPairShift(this, kPPC_ShiftRightPair, node);
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitWord32PairSar(node_t node) {
++  VisitPairShift(this, kPPC_ShiftRightAlgPair, node);
++}
++#endif  // !V8_TARGET_ARCH_PPC64
++
++#if !V8_TARGET_ARCH_PPC64
++namespace {
++// 64bitアトミック(ppc32では非アトミック。code-generator側のコメント参照)。
++// 入力: base, index, 値... / 出力: projection0=下位, projection1=上位
++template <typename Adapter>
++void VisitAtomicPair(InstructionSelectorT<Adapter>* selector,
++                     InstructionCode opcode, typename Adapter::node_t node,
++                     int value_count, int temp_count) {
++  PPCOperandGeneratorT<Adapter> g(selector);
++  InstructionOperand inputs[8];
++  size_t input_count = 0;
++  inputs[input_count++] = g.UseUniqueRegister(selector->input_at(node, 0));
++  inputs[input_count++] = g.UseUniqueRegister(selector->input_at(node, 1));
++  for (int k = 0; k < value_count; k++) {
++    // BE では RawMachineAssembler の VALUE_HALVES により値が (上位, 下位) の
++    // 順で渡される。code-generator が期待する (下位, 上位) へ正規化する。
++    // CompareExchange(value_count==4) は VALUE_HALVES を通らないので対象外。
++    int idx = 2 + k;
++#if defined(V8_TARGET_BIG_ENDIAN)
++    if (value_count == 2) idx = 2 + (1 - k);
++#endif
++    inputs[input_count++] = g.UseUniqueRegister(selector->input_at(node, idx));
++  }
++
++  InstructionOperand outputs[2];
++  size_t output_count = 0;
++  InstructionOperand temps[4];
++  size_t tcount = 0;
++
++  typename Adapter::node_t proj0 = selector->FindProjection(node, 0);
++  typename Adapter::node_t proj1 = selector->FindProjection(node, 1);
++  // code-generator は出力を (下位, 上位) の固定順で書く。片方だけ生きている
++  // 場合に正しく割り当てる術がないため、その経路は未対応とする。
++  // (CSA のビルトインは常に両方使う。片方だけになるのは WASM の int64
++  //  lowering 経由で、ppc32 では WASM を無効化済み)
++  CHECK(selector->valid(proj0) && selector->valid(proj1));
++  if (selector->valid(proj0)) {
++    outputs[output_count++] = g.DefineAsRegister(proj0);
++  } else {
++    temps[tcount++] = g.TempRegister();
++  }
++  if (selector->valid(proj1)) {
++    outputs[output_count++] = g.DefineAsRegister(proj1);
++  } else {
++    temps[tcount++] = g.TempRegister();
++  }
++  for (int k = 0; k < temp_count; k++) temps[tcount++] = g.TempRegister();
++
++  selector->Emit(opcode, output_count, outputs, input_count, inputs, tcount,
++                 temps);
++}
++}  // namespace
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitWord32AtomicPairLoad(node_t node) {
++  VisitAtomicPair(this, kPPC_AtomicPairLoad, node, 0, 0);
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitWord32AtomicPairStore(node_t node) {
++  PPCOperandGeneratorT<Adapter> g(this);
++  // BE では値が (上位, 下位) で渡される(VALUE_HALVES)。(下位, 上位) に戻す。
++#if defined(V8_TARGET_BIG_ENDIAN)
++  const int lo = 3, hi = 2;
++#else
++  const int lo = 2, hi = 3;
++#endif
++  InstructionOperand inputs[] = {g.UseUniqueRegister(this->input_at(node, 0)),
++                                 g.UseUniqueRegister(this->input_at(node, 1)),
++                                 g.UseUniqueRegister(this->input_at(node, lo)),
++                                 g.UseUniqueRegister(this->input_at(node, hi))};
++  Emit(kPPC_AtomicPairStore, 0, nullptr, 4, inputs);
++}
++
++#define VISIT_ATOMIC_PAIR_BINOP(name)                                     \
++  template <typename Adapter>                                             \
++  void InstructionSelectorT<Adapter>::VisitWord32AtomicPair##name(        \
++      node_t node) {                                                      \
++    VisitAtomicPair(this, kPPC_AtomicPair##name, node, 2, 2);             \
++  }
++VISIT_ATOMIC_PAIR_BINOP(Add)
++VISIT_ATOMIC_PAIR_BINOP(Sub)
++VISIT_ATOMIC_PAIR_BINOP(And)
++VISIT_ATOMIC_PAIR_BINOP(Or)
++VISIT_ATOMIC_PAIR_BINOP(Xor)
++#undef VISIT_ATOMIC_PAIR_BINOP
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitWord32AtomicPairExchange(
++    node_t node) {
++  VisitAtomicPair(this, kPPC_AtomicPairExchange, node, 2, 0);
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitWord32AtomicPairCompareExchange(
++    node_t node) {
++  VisitAtomicPair(this, kPPC_AtomicPairCompareExchange, node, 4, 0);
+ }
++#endif  // !V8_TARGET_ARCH_PPC64
+ 
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitInt32Add(node_t node) {
+@@ -2520,7 +2748,11 @@
+         case RegisterRepresentation::Word64():
+           cont->OverwriteAndNegateIfEqual(
+               GetComparisonFlagCondition(*comparison));
++#if V8_TARGET_ARCH_PPC64
+           return VisitWord64Compare(this, value, cont);
++#else
++          UNREACHABLE();
++#endif
+         case RegisterRepresentation::Float32():
+           switch (comparison->kind) {
+             case ComparisonOp::Kind::kEqual:
+@@ -2597,7 +2829,11 @@
+       return VisitWordCompare(this, value, kPPC_Tst32, cont, true,
+                               kInt16Imm_Unsigned);
+     } else if (value_op.Is<Opmask::kWord64Sub>()) {
++#if V8_TARGET_ARCH_PPC64
+       return VisitWord64Compare(this, value, cont);
++#else
++      UNREACHABLE();
++#endif
+     } else if (value_op.Is<Opmask::kWord64BitwiseAnd>()) {
+       return VisitWordCompare(this, value, kPPC_Tst64, cont, true,
+                               kInt16Imm_Unsigned);
+@@ -2638,10 +2874,13 @@
+       Emit(kPPC_Sub, index_operand, value_operand,
+            g.TempImmediate(sw.min_value()));
+       }
++#if V8_TARGET_ARCH_PPC64
+       // Zero extend, because we use it as 64-bit index into the jump table.
++      // ppc32 の索引は元から 32bit なので拡張は不要(V8 6.8 も行っていない)。
+       InstructionOperand index_operand_zero_ext = g.TempRegister();
+       Emit(kPPC_Uint32ToUint64, index_operand_zero_ext, index_operand);
+       index_operand = index_operand_zero_ext;
++#endif
+       // Generate a table lookup.
+       return EmitTableSwitch(sw, index_operand);
+   }
+@@ -2894,7 +3133,26 @@
+        g.UseRegister(this->input_at(node, 0)));
+ }
+ 
++#if !V8_TARGET_ARCH_PPC64
+ template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitBitcastWord32PairToFloat64(
++    node_t node) {
++  if constexpr (Adapter::IsTurbofan) {
++    // Turbofan は Float64Insert{High,Low}Word32 を使う。
++    UNREACHABLE();
++  } else {
++    PPCOperandGeneratorT<Adapter> g(this);
++    const turboshaft::BitcastWord32PairToFloat64Op& cast_op =
++        this->Get(node)
++            .template Cast<turboshaft::BitcastWord32PairToFloat64Op>();
++    Emit(kPPC_DoubleConstruct, g.DefineAsRegister(node),
++         g.UseRegister(cast_op.high_word32()),
++         g.UseRegister(cast_op.low_word32()));
++  }
++}
++#endif  // !V8_TARGET_ARCH_PPC64
++
++template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitFloat64InsertLowWord32(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+@@ -3304,6 +3562,7 @@
+   UNREACHABLE();
+ }
+ 
++#if V8_ENABLE_WEBASSEMBLY
+ #define SIMD_TYPES(V) \
+   V(F64x2)            \
+   V(F32x4)            \
+@@ -3729,6 +3988,8 @@
+          g.UseUniqueRegister(this->input_at(node, 1)),
+          g.UseUniqueRegister(this->input_at(node, 2)));
+ }
++
++#endif  // V8_ENABLE_WEBASSEMBLY
+ 
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::EmitPrepareResults(
+@@ -3756,6 +4017,7 @@
+   }
+ }
+ 
++#if V8_ENABLE_WEBASSEMBLY
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitLoadLane(node_t node) {
+   PPCOperandGeneratorT<Adapter> g(this);
+@@ -3959,6 +4221,8 @@
+     Emit(opcode | AddressingModeField::encode(kMode_MRR), 0, nullptr, 4,
+          inputs);
+ }
++
++#endif  // V8_ENABLE_WEBASSEMBLY
+ 
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::AddOutputToSelectContinuation(
+@@ -3976,6 +4240,7 @@
+   UNREACHABLE();
+ }
+ 
++#if V8_ENABLE_WEBASSEMBLY
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitF64x2NearestInt(node_t node) {
+   UNREACHABLE();
+@@ -3985,9 +4250,11 @@
+ void InstructionSelectorT<Adapter>::VisitF32x4NearestInt(node_t node) {
+   UNREACHABLE();
+ }
++#endif  // V8_ENABLE_WEBASSEMBLY
+ 
+ MachineOperatorBuilder::Flags
+ InstructionSelector::SupportedMachineOperatorFlags() {
++#if V8_TARGET_ARCH_PPC64
+   return MachineOperatorBuilder::kFloat32RoundDown |
+          MachineOperatorBuilder::kFloat64RoundDown |
+          MachineOperatorBuilder::kFloat32RoundUp |
+@@ -3997,6 +4264,11 @@
+          MachineOperatorBuilder::kFloat64RoundTiesAway |
+          MachineOperatorBuilder::kWord32Popcnt |
+          MachineOperatorBuilder::kWord64Popcnt;
++#else
++  // 750CL(Gekko/Broadway)はPOWER5+のfri[mpz]n丸め命令とpopcnt系を持たない。
++  // フラグを外すとCSA/reducerが純粋演算フォールバックに切り替わる。
++  return MachineOperatorBuilder::kNoFlags;
++#endif
+   // We omit kWord32ShiftIsSafe as s[rl]w use 0x3F as a mask rather than 0x1F.
+ }
+ 
+--- a/deps/v8/src/compiler/c-linkage.cc
++++ b/deps/v8/src/compiler/c-linkage.cc
+@@ -85,11 +85,14 @@
+ #define CALLEE_SAVE_REGISTERS s0, s1, s2, s3, s4, s5, s6, s7, s8, fp
+ #define CALLEE_SAVE_FP_REGISTERS f24, f25, f26, f27, f28, f29, f30, f31
+ 
+-#elif V8_TARGET_ARCH_PPC64
++#elif V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
+ // ===========================================================================
+ // == ppc & ppc64 ============================================================
+ // ===========================================================================
+-#ifdef V8_TARGET_LITTLE_ENDIAN  // ppc64le linux
++#if !V8_TARGET_ARCH_PPC64
++// ppc32 SysV ABI: 呼び出し元が引数保存領域を確保しない。
++#define STACK_SHADOW_WORDS 0
++#elif defined(V8_TARGET_LITTLE_ENDIAN)  // ppc64le linux
+ #define STACK_SHADOW_WORDS 12
+ #else  // AIX
+ #define STACK_SHADOW_WORDS 14
+--- a/deps/v8/src/compiler/fast-api-calls.cc
++++ b/deps/v8/src/compiler/fast-api-calls.cc
+@@ -349,7 +349,8 @@
+         static_cast<int>(offsetof(v8::FastApiCallbackOptions, fallback)),
+         __ Int32Constant(0));
+ 
+-    Node* data_argument_to_pass = __ AdaptLocalArgument(data_argument);
++    // options.data は Local<Value> 1 word のフィールドなので中身を入れる。
++    Node* data_argument_to_pass = __ AdaptLocalValue(data_argument);
+ 
+     __ Store(StoreRepresentation(MachineType::PointerRepresentation(),
+                                  kNoWriteBarrier),
+--- a/deps/v8/src/compiler/graph-assembler.cc
++++ b/deps/v8/src/compiler/graph-assembler.cc
+@@ -1036,7 +1036,7 @@
+       graph()->NewNode(machine()->StackSlot(size, alignment, is_tagged)));
+ }
+ 
+-Node* GraphAssembler::AdaptLocalArgument(Node* argument) {
++Node* GraphAssembler::AdaptLocalValue(Node* argument) {
+ #ifdef V8_ENABLE_DIRECT_LOCAL
+   // With direct locals, the argument can be passed directly.
+   return BitcastTaggedToWord(argument);
+@@ -1048,6 +1048,22 @@
+                             kNoWriteBarrier),
+         stack_slot, 0, BitcastTaggedToWord(argument));
+   return stack_slot;
++#endif
++}
++
++Node* GraphAssembler::AdaptLocalArgument(Node* argument) {
++  Node* value = AdaptLocalValue(argument);
++#ifdef V8_ABI_PASSES_HANDLES_BY_REFERENCE
++  // Local<T> は class type なので値渡しでもレジスタに載らない。callee は
++  // 「Local へのポインタ」を期待するので、Local 自体をスタックに置く。
++  // 中身は不変 (内側スロットのアドレス) なので is_tagged は false。
++  Node* handle = StackSlot(sizeof(uintptr_t), alignof(uintptr_t), false);
++  Store(StoreRepresentation(MachineType::PointerRepresentation(),
++                            kNoWriteBarrier),
++        handle, 0, value);
++  return handle;
++#else
++  return value;
+ #endif
+ }
+ 
+--- a/deps/v8/src/compiler/graph-assembler.h
++++ b/deps/v8/src/compiler/graph-assembler.h
+@@ -403,6 +403,10 @@
+ 
+   TNode<RawPtrT> StackSlot(int size, int alignment, bool is_tagged = false);
+ 
++  // Local<T> の中身 (val_ = ハンドルスロットのアドレス) を得る。
++  // 構造体フィールドへの格納など、値そのものが欲しい場所で使う。
++  Node* AdaptLocalValue(Node* argument);
++  // Local<T> を C 関数の引数として値渡しする。
+   Node* AdaptLocalArgument(Node* argument);
+ 
+   Node* Store(StoreRepresentation rep, Node* object, Node* offset, Node* value);
+--- a/deps/v8/src/compiler/turboshaft/assembler.h
++++ b/deps/v8/src/compiler/turboshaft/assembler.h
+@@ -2600,7 +2600,8 @@
+     return ReduceIfReachableStackSlot(size, alignment, is_tagged);
+   }
+ 
+-  V<WordPtr> AdaptLocalArgument(V<Object> argument) {
++  // Local<T> の中身 (val_ = ハンドルスロットのアドレス) を得る。
++  V<WordPtr> AdaptLocalValue(V<Object> argument) {
+ #ifdef V8_ENABLE_DIRECT_LOCAL
+     // With direct locals, the argument can be passed directly.
+     return BitcastTaggedToWordPtr(argument);
+@@ -2615,6 +2616,20 @@
+ #endif
+   }
+ 
++  // Local<T> を C 関数の引数として値渡しする。
++  V<WordPtr> AdaptLocalArgument(V<Object> argument) {
++    V<WordPtr> value = AdaptLocalValue(argument);
++#ifdef V8_ABI_PASSES_HANDLES_BY_REFERENCE
++    // ppc32 SysV: callee は Local へのポインタを期待する。
++    V<WordPtr> handle =
++        StackSlot(sizeof(uintptr_t), alignof(uintptr_t), false);
++    StoreOffHeap(handle, value, MemoryRepresentation::UintPtr());
++    return handle;
++#else
++    return value;
++#endif
++  }
++
+   OpIndex LoadRootRegister() { return ReduceIfReachableLoadRootRegister(); }
+ 
+   OpIndex Select(OpIndex cond, OpIndex vtrue, OpIndex vfalse,
+--- a/deps/v8/src/compiler/turboshaft/fast-api-call-lowering-reducer.h
++++ b/deps/v8/src/compiler/turboshaft/fast-api-call-lowering-reducer.h
+@@ -87,7 +87,8 @@
+                       MemoryRepresentation::Int32(),
+                       offsetof(v8::FastApiCallbackOptions, fallback));
+       // data = data_argument
+-      OpIndex data_argument_to_pass = __ AdaptLocalArgument(data_argument);
++      // options.data は Local<Value> 1 word のフィールド。
++      OpIndex data_argument_to_pass = __ AdaptLocalValue(data_argument);
+       __ StoreOffHeap(stack_slot, data_argument_to_pass,
+                       MemoryRepresentation::UintPtr(),
+                       offsetof(v8::FastApiCallbackOptions, data));
+--- a/deps/v8/src/diagnostics/eh-frame.cc
++++ b/deps/v8/src/diagnostics/eh-frame.cc
+@@ -11,7 +11,7 @@
+ 
+ #if !defined(V8_TARGET_ARCH_X64) && !defined(V8_TARGET_ARCH_ARM) &&     \
+     !defined(V8_TARGET_ARCH_ARM64) && !defined(V8_TARGET_ARCH_S390X) && \
+-    !defined(V8_TARGET_ARCH_PPC64)
++    !defined(V8_TARGET_ARCH_PPC64) && !defined(V8_TARGET_ARCH_PPC)
+ 
+ // Placeholders for unsupported architectures.
+ 
+--- a/deps/v8/src/diagnostics/ppc/eh-frame-ppc.cc
++++ b/deps/v8/src/diagnostics/ppc/eh-frame-ppc.cc
+@@ -10,7 +10,11 @@
+ 
+ const int EhFrameConstants::kCodeAlignmentFactor = 4;
+ // all PPC are 4 bytes instruction
++#if V8_TARGET_ARCH_PPC64
+ const int EhFrameConstants::kDataAlignmentFactor = -8;  // 64-bit always -8
++#else
++const int EhFrameConstants::kDataAlignmentFactor = -4;  // ppc32 はワード幅
++#endif
+ 
+ void EhFrameWriter::WriteReturnAddressRegisterCode() {
+   WriteULeb128(kLrDwarfCode);
+--- a/deps/v8/src/execution/ppc/simulator-ppc.cc
++++ b/deps/v8/src/execution/ppc/simulator-ppc.cc
+@@ -940,8 +940,20 @@
+ }
+ 
+ static void decodeObjectPair(ObjectPair* pair, intptr_t* x, intptr_t* y) {
++#ifdef V8_HOST_ARCH_64_BIT
+   *x = static_cast<intptr_t>(pair->x);
+   *y = static_cast<intptr_t>(pair->y);
++#else
++  // 32bitホストでは ObjectPair は2つのポインタを詰めた uint64_t
++  // (runtime-utils.h の MakePair 参照)。同じ並びで取り出す。
++#if defined(V8_TARGET_BIG_ENDIAN)
++  *x = static_cast<intptr_t>(*pair >> 32);
++  *y = static_cast<intptr_t>(*pair & 0xFFFFFFFFu);
++#else
++  *x = static_cast<intptr_t>(*pair & 0xFFFFFFFFu);
++  *y = static_cast<intptr_t>(*pair >> 32);
++#endif
++#endif
+ }
+ 
+ // Calls into the V8 runtime.
+@@ -2310,7 +2322,7 @@
+       uintptr_t rs_val = get_register(rs);
+       uintptr_t count = 0;
+       int n = 0;
+-      uintptr_t bit = 0x8000000000000000UL;
++      uintptr_t bit = static_cast<uintptr_t>(1) << (sizeof(uintptr_t) * 8 - 1);
+       for (; n < 64; n++) {
+         if (bit & rs_val) count++;
+         bit >>= 1;
+@@ -3584,6 +3596,17 @@
+       set_d_register_from_double(frt, frt_val);
+       return;
+     }
++    case FRSQRTE: {
++      // 750CL向けソフトsqrt(SqrtDoubleSoft)が使う逆数平方根の概算命令。
++      // 実機は約5bit精度だが、生成コード側がNewton-Raphsonで補正するので
++      // ここでは正確な 1/sqrt(x) を返してよい。
++      int frt = instr->RTValue();
++      int frb = instr->RBValue();
++      double frb_val = get_double_from_d_register(frb);
++      double frt_val = 1.0 / std::sqrt(frb_val);
++      set_d_register_from_double(frt, frt_val);
++      return;
++    }
+     case FSEL: {
+       int frt = instr->RTValue();
+       int fra = instr->RAValue();
+@@ -4237,6 +4260,7 @@
+       set_simd_register(vrt, *ptr);
+       break;
+     }
++#ifdef __SIZEOF_INT128__  // ppc32ホストではSIMD非対応
+     case STVX: {
+       DECODE_VX_INSTRUCTION(vrs, ra, rb, S)
+       GET_ADDRESS(ra, rb, ra_val, rb_val)
+@@ -4244,6 +4268,7 @@
+       WriteQW((ra_val + rb_val) & 0xFFFFFFFFFFFFFFF0, vrs_val);
+       break;
+     }
++#endif  // __SIZEOF_INT128__
+     case LXVD: {
+       DECODE_VX_INSTRUCTION(xt, ra, rb, T)
+       GET_ADDRESS(ra, rb, ra_val, rb_val)
+@@ -4268,6 +4293,7 @@
+               get_simd_register_by_lane<int64_t>(xs, 1));
+       break;
+     }
++#ifdef __SIZEOF_INT128__  // ppc32ホストではSIMD非対応
+     case STXVX: {
+       DECODE_VX_INSTRUCTION(vrs, ra, rb, S)
+       GET_ADDRESS(ra, rb, ra_val, rb_val)
+@@ -4276,6 +4302,7 @@
+       WriteQW(addr, vrs_val);
+       break;
+     }
++#endif  // __SIZEOF_INT128__
+     case LXSIBZX: {
+       DECODE_VX_INSTRUCTION(xt, ra, rb, T)
+       GET_ADDRESS(ra, rb, ra_val, rb_val)
+@@ -4324,6 +4351,7 @@
+       WriteDW(ra_val + rb_val, get_simd_register_by_lane<int64_t>(xs, 0));
+       break;
+     }
++#ifdef __SIZEOF_INT128__  // ppc32ホストではSIMD非対応
+     case XXBRQ: {
+       int t = instr->RTValue();
+       int b = instr->RBValue();
+@@ -4333,6 +4361,7 @@
+       set_simd_register(t, simdr_xb);
+       break;
+     }
++#endif  // __SIZEOF_INT128__
+ #define VSPLT(type)                                       \
+   uint8_t uim = instr->Bits(19, 16);                      \
+   int vrt = instr->RTValue();                             \
+@@ -5123,22 +5152,23 @@
+       break;
+     }
+     case XVRSPIP: {
+-      VECTOR_FP_ROUNDING(float, ceilf)
++      VECTOR_FP_ROUNDING(float, ceil)
+       break;
+     }
+     case XVRSPIM: {
+-      VECTOR_FP_ROUNDING(float, floorf)
++      VECTOR_FP_ROUNDING(float, floor)
+       break;
+     }
+     case XVRSPIZ: {
+-      VECTOR_FP_ROUNDING(float, truncf)
++      VECTOR_FP_ROUNDING(float, trunc)
+       break;
+     }
+     case XVRSPI: {
+-      VECTOR_FP_ROUNDING(float, nearbyintf)
++      VECTOR_FP_ROUNDING(float, nearbyint)
+       break;
+     }
+ #undef VECTOR_FP_ROUNDING
++#ifdef __SIZEOF_INT128__  // ppc32ホストではSIMD非対応
+     case VSEL: {
+       int vrt = instr->RTValue();
+       int vra = instr->RAValue();
+@@ -5155,6 +5185,7 @@
+       set_simd_register(vrt, *result);
+       break;
+     }
++#endif  // __SIZEOF_INT128__
+     case VPERM: {
+       int vrt = instr->RTValue();
+       int vra = instr->RAValue();
+@@ -5177,6 +5208,7 @@
+       }
+       break;
+     }
++#ifdef __SIZEOF_INT128__  // ppc32ホストではSIMD非対応
+     case VBPERMQ: {
+       DECODE_VX_INSTRUCTION(t, a, b, T)
+       uint16_t result_bits = 0;
+@@ -5196,6 +5228,7 @@
+       set_simd_register_by_lane<uint16_t>(t, 3, result_bits);
+       break;
+     }
++#endif  // __SIZEOF_INT128__
+ #define VECTOR_FP_QF(type, sign)                             \
+   DECODE_VX_INSTRUCTION(t, a, b, T)                          \
+   FOR_EACH_LANE(i, type) {                                   \
+--- a/deps/v8/src/execution/ppc/simulator-ppc.h
++++ b/deps/v8/src/execution/ppc/simulator-ppc.h
+@@ -325,6 +325,7 @@
+   }
+ 
+   // Byte Reverse.
++#ifdef __SIZEOF_INT128__
+   static inline __uint128_t __builtin_bswap128(__uint128_t v) {
+     union {
+       uint64_t u64[2];
+@@ -335,14 +336,25 @@
+     res.u64[1] = ByteReverse<int64_t>(val.u64[0]);
+     return res.u128;
+   }
++#endif
+ 
++// 32bitホスト(-m32)には __int128 が無い。QW(128bit)はSIMD用で
++// ppc32ターゲットでは到達しないため、その場合は一覧から外す。
++#ifdef __SIZEOF_INT128__
+ #define RW_VAR_LIST(V)      \
+   V(QWU, unsigned __int128) \
+   V(QW, __int128)           \
++  V(DWU, uint64_t)          \
++  V(DW, int64_t)            \
++  V(WU, uint32_t)           \
++  V(W, int32_t) V(HU, uint16_t) V(H, int16_t) V(BU, uint8_t) V(B, int8_t)
++#else
++#define RW_VAR_LIST(V)      \
+   V(DWU, uint64_t)          \
+   V(DW, int64_t)            \
+   V(WU, uint32_t)           \
+   V(W, int32_t) V(HU, uint16_t) V(H, int16_t) V(BU, uint8_t) V(B, int8_t)
++#endif
+ 
+ #define GENERATE_RW_FUNC(size, type)                   \
+   inline type Read##size(uintptr_t addr);              \
+--- a/deps/v8/src/heap/base/asm/ppc/push_registers_asm.cc
++++ b/deps/v8/src/heap/base/asm/ppc/push_registers_asm.cc
+@@ -16,6 +16,48 @@
+ 
+ // AIX Runtime process stack:
+ // https://www.ibm.com/support/knowledgecenter/ssw_aix_71/assembler/idalangref_runtime_process.html
++// ppc32 (Linux SysV ABI) 版。ppc64 とは LR 退避位置もフレーム構成も違う。
++#if !defined(__powerpc64__) && !defined(_AIX)
++asm(".text                                              \n"
++    ".align 2                                           \n"
++    ".globl PushAllRegistersAndIterateStack             \n"
++    ".type PushAllRegistersAndIterateStack, %function   \n"
++    ".hidden PushAllRegistersAndIterateStack            \n"
++    "PushAllRegistersAndIterateStack:                   \n"
++    // SysV: LR は呼び出し元フレームの 4(sp) に退避する。
++    "  mflr 0                                          \n"
++    "  stw  0, 4(1)                                    \n"
++    // 112B フレーム: 0-7 back chain 等 / 8-31 引数保存 / 32-103 r14-r31。
++    "  stwu 1, -112(1)                                 \n"
++    "  stw 14, 32(1)                                   \n"
++    "  stw 15, 36(1)                                   \n"
++    "  stw 16, 40(1)                                   \n"
++    "  stw 17, 44(1)                                   \n"
++    "  stw 18, 48(1)                                   \n"
++    "  stw 19, 52(1)                                   \n"
++    "  stw 20, 56(1)                                   \n"
++    "  stw 21, 60(1)                                   \n"
++    "  stw 22, 64(1)                                   \n"
++    "  stw 23, 68(1)                                   \n"
++    "  stw 24, 72(1)                                   \n"
++    "  stw 25, 76(1)                                   \n"
++    "  stw 26, 80(1)                                   \n"
++    "  stw 27, 84(1)                                   \n"
++    "  stw 28, 88(1)                                   \n"
++    "  stw 29, 92(1)                                   \n"
++    "  stw 30, 96(1)                                   \n"
++    "  stw 31, 100(1)                                  \n"
++    // r3 (Stack*), r4 (StackVisitor*) はそのまま渡す。
++    // r5 (IterateStackCallback) を退避し、第3引数を sp にする。
++    "  mr 6, 5                                         \n"
++    "  mr 5, 1                                         \n"
++    "  mtctr 6                                         \n"
++    "  bctrl                                           \n"
++    "  addi 1, 1, 112                                  \n"
++    "  lwz 0, 4(1)                                     \n"
++    "  mtlr 0                                          \n"
++    "  blr                                             \n");
++#else
+ asm(
+ #if defined(_AIX)
+     ".csect .text[PR]                                   \n"
+@@ -95,3 +137,4 @@
+     "  ld 2, 24(1)                                     \n"
+ #endif
+     "  blr                                             \n");
++#endif
+--- a/deps/v8/src/maglev/maglev-graph-builder.cc
++++ b/deps/v8/src/maglev/maglev-graph-builder.cc
+@@ -79,6 +79,9 @@
+     defined(V8_TARGET_ARCH_RISCV32) || defined(V8_TARGET_ARCH_LOONG64) || \
+     defined(V8_TARGET_ARCH_MIPS64)
+       return true;
++#elif defined(V8_TARGET_ARCH_PPC)
++      // 750CL(Wii Broadway)はPOWER5+の丸め命令(frim/frip/friz/frin)を持たない。
++      return false;
+ #else
+ #error "V8 does not support this architecture."
+ #endif
+--- a/deps/v8/src/snapshot/snapshot-data.h
++++ b/deps/v8/src/snapshot/snapshot-data.h
+@@ -47,14 +47,23 @@
+       0xC0DE0000 ^ ExternalReferenceTable::kSize;
+ 
+  protected:
++  // ppc32(Wii): base::Write/ReadLittleEndianValue は *ターゲット* のエンディアン
++  // で分岐するので BE ターゲットでは LE にならない。ヘッダは常に LE と決まって
++  // いるのでバイト単位で明示する。
+   void SetHeaderValue(uint32_t offset, uint32_t value) {
+-    base::WriteLittleEndianValue(reinterpret_cast<Address>(data_) + offset,
+-                                 value);
++    uint8_t* p = data_ + offset;
++    p[0] = static_cast<uint8_t>(value);
++    p[1] = static_cast<uint8_t>(value >> 8);
++    p[2] = static_cast<uint8_t>(value >> 16);
++    p[3] = static_cast<uint8_t>(value >> 24);
+   }
+ 
+   uint32_t GetHeaderValue(uint32_t offset) const {
+-    return base::ReadLittleEndianValue<uint32_t>(
+-        reinterpret_cast<Address>(data_) + offset);
++    const uint8_t* p = data_ + offset;
++    return static_cast<uint32_t>(p[0]) |
++           (static_cast<uint32_t>(p[1]) << 8) |
++           (static_cast<uint32_t>(p[2]) << 16) |
++           (static_cast<uint32_t>(p[3]) << 24);
+   }
+ 
+   void AllocateData(uint32_t size);
+--- a/deps/v8/src/snapshot/snapshot.cc
++++ b/deps/v8/src/snapshot/snapshot.cc
+@@ -60,12 +60,22 @@
+   static uint32_t GetHeaderValue(const v8::StartupData* data, uint32_t offset) {
+     DCHECK_NOT_NULL(data);
+     DCHECK_LT(offset, static_cast<uint32_t>(data->raw_size));
+-    return base::ReadLittleEndianValue<uint32_t>(
+-        reinterpret_cast<Address>(data->data) + offset);
++    // ppc32(Wii): base::ReadLittleEndianValue は *ターゲット* のエンディアンで
++    // 分岐するため BE ターゲットではヘッダまで BE で読んでしまう。
++    // ヘッダは常に LE と決まっているのでバイト単位で明示的に読む。
++    const uint8_t* p =
++        reinterpret_cast<const uint8_t*>(data->data) + offset;
++    return static_cast<uint32_t>(p[0]) |
++           (static_cast<uint32_t>(p[1]) << 8) |
++           (static_cast<uint32_t>(p[2]) << 16) |
++           (static_cast<uint32_t>(p[3]) << 24);
+   }
+   static void SetHeaderValue(char* data, uint32_t offset, uint32_t value) {
+-    base::WriteLittleEndianValue(reinterpret_cast<Address>(data) + offset,
+-                                 value);
++    uint8_t* p = reinterpret_cast<uint8_t*>(data) + offset;
++    p[0] = static_cast<uint8_t>(value);
++    p[1] = static_cast<uint8_t>(value >> 8);
++    p[2] = static_cast<uint8_t>(value >> 16);
++    p[3] = static_cast<uint8_t>(value >> 24);
+   }
+ 
+   static void CheckVersion(const v8::StartupData* data);
+--- a/src/node.cc
++++ b/src/node.cc
+@@ -834,9 +834,11 @@
+   }
+ 
+   // Support stable Phase 5 WebAssembly proposals
++#if !defined(__powerpc__) || defined(__powerpc64__)  // WebAssembly is disabled on PPC32
+   v8_args.emplace_back("--experimental-wasm-imported-strings");
+   v8_args.emplace_back("--experimental-wasm-memory64");
+   v8_args.emplace_back("--experimental-wasm-exnref");
++#endif
+ 
+ #ifdef __POSIX__
+   // Block SIGPROF signals when sleeping in epoll_wait/kevent/etc.  Avoids the
+--- a/tools/v8_gypfiles/features.gypi
++++ b/tools/v8_gypfiles/features.gypi
+@@ -302,6 +302,8 @@
+ 
+     # Enable Sparkplug
+     # Sets -DV8_ENABLE_SPARKPLUG.
++    # ppc32(Wii)向け: baseline(Sparkplug)は PPC64 しか対応していない
++    # (baseline-assembler-inl.h の振り分けに V8_TARGET_ARCH_PPC が無い)。
+     'v8_enable_sparkplug%': 1,
+ 
+     # Whether custom embedder snapshots may extend (= allocate new objects in)
+@@ -332,7 +334,8 @@
+     # will fail. Also, asm.js will not be translated to WebAssembly and will be
+     # executed as standard JavaScript instead.
+     # Sets -dV8_ENABLE_WEBASSEMBLY.
+-    'v8_enable_webassembly%': 1,
++    # ppc32(Wii): WASMは jump-table-assembler.h が ppc32 を持たないため不可。
++    'v8_enable_webassembly%': 0,
+ 
+     # Enable advanced BigInt algorithms, costing about 10-30 KiB binary size
+     # depending on platform.
+--- a/tools/v8_gypfiles/toolchain.gypi
++++ b/tools/v8_gypfiles/toolchain.gypi
+@@ -43,7 +43,7 @@
+ 
+     # Toolchain settings.
+     'v8_target_arch%': '<(target_arch)',
+-    'v8_host_byteorder%': '<!("<(python)" -c "import sys; print(sys.byteorder)")',
++    'v8_host_byteorder%': 'big',
+     'force_dynamic_crt%': 0,
+ 
+     # Enable control-flow integrity features, such as pointer authentication
+--- a/tools/v8_gypfiles/v8.gyp
++++ b/tools/v8_gypfiles/v8.gyp
+@@ -8,7 +8,9 @@
+     'v8_random_seed%': 314159265,
+     'v8_vector_stores%': 0,
+     'v8_embed_script%': "",
+-    'mksnapshot_exec': '<(PRODUCT_DIR)/<(EXECUTABLE_PREFIX)mksnapshot<(EXECUTABLE_SUFFIX)',
++    # ppc32(Wii): ターゲットとしてビルドした mksnapshot_target を
++    # qemu-ppc-static で走らせるラッパー。BE ペイロードのために必須。
++    'mksnapshot_exec': '<(PRODUCT_DIR)/run-mksnapshot-qemu.sh',
+     'v8_os_page_size%': 0,
+     'generate_bytecode_output_root': '<(SHARED_INTERMEDIATE_DIR)/generate-bytecode-output-root',
+     'generate_bytecode_builtins_list_output': '<(generate_bytecode_output_root)/builtins-generated/bytecodes-builtins-list.h',
+@@ -429,6 +431,7 @@
+           },
+           'inputs': [
+             '<(mksnapshot_exec)',
++            '<(PRODUCT_DIR)/mksnapshot_target',
+           ],
+           'outputs': [
+             '<(INTERMEDIATE_DIR)/snapshot.cc',
+@@ -480,7 +483,7 @@
+           'dependencies': [
+             'generate_bytecode_builtins_list',
+             'run_torque',
+-            'mksnapshot#host',
++            'mksnapshot#target',
+             'v8_maybe_icu',
+             # [GYP] added explicitly, instead of inheriting from the other deps
+             'v8_base_without_compiler',
+@@ -1797,6 +1800,8 @@
+     {
+       'target_name': 'mksnapshot',
+       'type': 'executable',
++      # qemu ラッパーが参照する名前。
++      'product_name': 'mksnapshot_target',
+       'dependencies': [
+         'v8_base_without_compiler',
+         'v8_compiler_for_mksnapshot',
+@@ -1814,7 +1819,11 @@
+       ],
+       'conditions': [
+         ['want_separate_host_toolset', {
+-          'toolsets': ['host'],
++          # ppc32(Wii): BE ペイロードを作れるのはターゲット版だけ。host 版は
++          # 使わないので作らない。両方作ると product_name が host にも適用され、
++          # 同じ mksnapshot_target を host リンカが作ろうとして
++          # "relocations in generic ELF (EM: 20)" で落ちる。
++          'toolsets': ['target'],
+         }],
+         # Avoid excessive LTO
+         ['enable_lto=="true"', {
+@@ -2025,9 +2034,15 @@
+             ],
+           }, { # 'OS!="win"'
+             'conditions': [
+-              ['_toolset == "host" and host_arch == "x64" or _toolset == "target" and target_arch=="x64"', {
++              ['_toolset == "host" and host_arch == "x64" and target_arch != "ppc" or _toolset == "target" and target_arch=="x64"', {
+                 'sources': [
+                   '<(V8_ROOT)/src/heap/base/asm/x64/push_registers_asm.cc',
++                ],
++              }],
++              # ppc32ターゲットではホストツールが -m32 になるため ia32 版を使う。
++              ['_toolset == "host" and host_arch == "x64" and target_arch == "ppc"', {
++                'sources': [
++                  '<(V8_ROOT)/src/heap/base/asm/ia32/push_registers_asm.cc',
+                 ],
+               }],
+               ['_toolset == "host" and host_arch == "ia32" or _toolset == "target" and target_arch=="ia32"', {
+@@ -2045,7 +2060,7 @@
+                   '<(V8_ROOT)/src/heap/base/asm/arm64/push_registers_asm.cc',
+                 ],
+               }],
+-              ['_toolset == "host" and host_arch == "ppc64" or _toolset == "target" and target_arch=="ppc64"', {
++              ['_toolset == "host" and host_arch == "ppc64" or _toolset == "target" and target_arch=="ppc64" or _toolset == "target" and target_arch=="ppc"', {
+                 'sources': [
+                   '<(V8_ROOT)/src/heap/base/asm/ppc/push_registers_asm.cc',
+                 ],
