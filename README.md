@@ -1,19 +1,26 @@
 # Node.js for Wii Linux PPC32
 
-Prebuilt Node.js 22.11.0 for Wii Linux PPC32 big-endian.
+Prebuilt Node.js 22.23.4 for Wii Linux PPC32 big-endian.
 
 This project distributes a standalone `node` executable. It does not require
 building Node.js on the Wii.
 
-## Current Build: `jit-r3`
+## Current Build: `jit-r4`
 
-`node-v22.11.0-wii-ppc32-jit-r3` runs with **V8 JIT enabled**, including the
-Sparkplug baseline tier. Earlier builds had to be started with `--jitless`;
-this one does not.
+`node-v22.23.4-wii-ppc32-jit-r4` is the `jit-r3` port rebased from Node.js
+22.11.0 to **22.23.4**, the October 2026 security release. 22.11.0 is missing
+a year of upstream security fixes, including the 2026-10-21 TLS, DNS and
+Brotli fixes. The bundled root certificates also no longer include the emSign
+roots affected by the eMudhra intermediate key compromise (CVE-2026-111943).
 
-`jit-r3` fixes V8 fast API calls on PPC32. In `jit-r2`, `npm install` crashed
-with SIGSEGV after tens of thousands of fast API calls unless it was run with
-`--no-turbo-fast-api-calls`. See Fast API Calls below.
+Node.js 22 stays on V8 12.4 for its whole life, so every PPC32 patch applies
+unchanged. One new patch is needed: since 22.12, Node passes WebAssembly
+feature flags to V8 at startup, and a V8 built without WebAssembly rejects
+them with `bad option` and exits. `0008-node-skip-wasm-flags-ppc32.patch`
+skips those flags on PPC32.
+
+It runs with **V8 JIT enabled**, including the Sparkplug baseline tier, and
+with the fast API call fix from `jit-r3`.
 
 The 750CL (Broadway) CPU is missing instructions that V8's PPC backend assumes,
 and V8 removed its PPC 32-bit code paths in 2024. This build restores those
@@ -26,8 +33,10 @@ rather than working around the symptoms in JavaScript. As a result:
   that `jitless-r2` needed is gone.
 - Compute-bound JavaScript is several times faster (see Measurements).
 
-The binary SHA-256 is recorded in `SHA256SUMS.node-v22.11.0-wii-ppc32-jit-r3`.
-The source changes are in `patches/` for review.
+The binary SHA-256 is recorded in `SHA256SUMS.node-v22.23.4-wii-ppc32-jit-r4`.
+The complete source change against the 22.23.4 tarball is
+`patches/node-v22.23.4-wii-ppc32-jit-r4.patch`; the numbered patches describe
+the individual changes.
 
 This repository distributes a tested binary and the patches used to produce it.
 It does not claim a fully reproducible upstream Node.js cross-build.
@@ -41,9 +50,9 @@ verify each chunk separately:
 ```sh
 git clone --depth 1 --filter=blob:none --no-checkout --branch chunks https://github.com/tanpang-dev/node-wii-ppc32.git node22-chunks
 cd node22-chunks
-git show HEAD:install-jit-from-chunks-r3.sh > install-jit-from-chunks-r3.sh
-chmod 755 install-jit-from-chunks-r3.sh
-./install-jit-from-chunks-r3.sh /root/node22-jit-r3
+git show HEAD:install-jit-from-chunks-r4.sh > install-jit-from-chunks-r4.sh
+chmod 755 install-jit-from-chunks-r4.sh
+./install-jit-from-chunks-r4.sh /root/node22-jit-r4
 ```
 
 The installer retries each missing chunk, verifies every chunk, verifies the
@@ -52,7 +61,27 @@ replace the system Node.js installation.
 
 ## Verification
 
-`jit-r3` was validated on Wii Linux (PowerPC 750CL, 729 MHz, 73 MB RAM):
+`jit-r4` was validated on Wii Linux (PowerPC 750CL, 729 MHz, 73 MB RAM):
+
+- `node --version` is `v22.23.4`, V8 `12.4.254.21-node.57`, OpenSSL `3.5.9`
+- `npm install` of a real package with npm 10.9.0
+- `Buffer` hex/base64/UTF-8 conversion, including multi-byte and 100 KB buffers
+- `Math.sqrt`, `floor`/`ceil`/`round`/`trunc`, int/float conversion in hot loops
+- BigInt arithmetic, `Atomics` on `BigInt64Array`, `DataView` endianness
+- `crypto`: SHA-256, HMAC, `randomBytes`, EC key generation, sign/verify
+- HTTPS against a live API
+- TurboFan `switch` jump tables and regular expressions
+- 300,000 fast API calls and 20,000 module resolution stats
+
+The generated builtin code was checked with `objdump`: 654,976 instructions
+contain none that the 750CL lacks.
+
+Steady-state timings are in the same range as `jit-r3`, with one exception:
+the regular expression benchmark measured 516 and 971 ms against 295 and
+277 ms for `jit-r3`. The Wii was near its memory limit during these runs, so
+treat the numbers as rough.
+
+`jit-r3` was validated on the same hardware:
 
 - Node.js startup, `npm 10.9.0`, `npm install` of a real package
 - `Buffer` hex/base64/UTF-8 conversion, including multi-byte and 100 KB buffers
@@ -163,6 +192,10 @@ succeeds without `--no-turbo-fast-api-calls`.
 | `0006-v8-enable-sparkplug-ppc32.patch` | Adds PPC32 to the two Sparkplug dispatch conditions and enables the feature. Eleven lines, most of them comments. |
 | `0007-v8-fast-api-call-ppc32-abi.patch` | Passes `v8::Local<T>` to fast API callbacks the way the PPC32 SysV C++ ABI expects. Without it, `npm install` crashes non-deterministically. |
 | `0005-build-cross-and-openssl-ppc.patch` | Cross-build configuration, and the missing OpenSSL `linux-ppc` branch. Without it, the arch selection falls back to `linux-x86_64` and bakes `-DL_ENDIAN` into a big-endian target. |
+| `0008-node-skip-wasm-flags-ppc32.patch` | Skips the WebAssembly feature flags Node passes to V8 at startup since 22.12. WebAssembly is disabled on PPC32, and V8 rejects the unknown flags with `bad option`. |
+
+The numbered patches `0001`-`0007` were written against 22.11.0 and apply to
+22.23.4 unchanged.
 
 ## WebAssembly
 
@@ -175,6 +208,10 @@ SIMD is not the obstacle. `SupportsWasmSimd128()` already requires `PPC_9_PLUS`,
 so the 750CL reports no SIMD support and modules that avoid it would still run.
 
 ## Previous Builds
+
+`node-v22.11.0-wii-ppc32-jit-r3` is the same port on Node.js 22.11.0. It lacks
+the upstream security fixes since then. Its installer is
+`install-jit-from-chunks-r3.sh`.
 
 `node-v22.11.0-wii-ppc32-jit-r1` is the same port without Sparkplug. Its
 installer is `install-jit-from-chunks.sh`.
